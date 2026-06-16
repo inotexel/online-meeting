@@ -540,3 +540,4 @@ This project is licensed under the **GNU General Public License v3.0** - see the
 **Made with ❤️ by [Srikanth Nani](https://www.srikanthnani.com/)**
 
 _Experience the power of Cluely, but with complete transparency and control over your data._
+"# pluely" 
