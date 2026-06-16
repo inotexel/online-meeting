@@ -20,7 +20,7 @@ import {
   RotateCcwIcon,
   ChevronUpIcon,
 } from "lucide-react";
-import { VadConfig } from "@/hooks/useSystemAudio";
+import { VadConfig, CaptureMode } from "@/hooks/useSystemAudio";
 import {
   PROMPT_TEMPLATES,
   getPromptTemplateById,
@@ -60,6 +60,7 @@ interface SettingsPanelProps {
   setUseSystemPrompt: (value: boolean) => void;
   contextContent: string;
   setContextContent: (content: string) => void;
+  captureMode: CaptureMode;
 }
 
 export const SettingsPanel = ({
@@ -69,6 +70,7 @@ export const SettingsPanel = ({
   setUseSystemPrompt,
   contextContent,
   setContextContent,
+  captureMode,
 }: SettingsPanelProps) => {
   const [isOpen, setIsOpen] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -109,7 +111,8 @@ export const SettingsPanel = ({
 
   const handleResetDefaults = () => {
     const defaultConfig: VadConfig = {
-      enabled: vadConfig.enabled, // Keep current mode
+      enabled: vadConfig.enabled,
+      capture_mode: vadConfig.capture_mode,
       hop_size: 1024,
       sensitivity_rms: 0.012,
       peak_threshold: 0.035,
@@ -118,9 +121,15 @@ export const SettingsPanel = ({
       pre_speech_chunks: 12,
       noise_gate_threshold: 0.003,
       max_recording_duration_secs: 180,
+      realtime_model: "gpt-realtime-whisper",
+      realtime_language: "en",
     };
     onUpdateVadConfig(defaultConfig);
   };
+
+  const isVadMode = captureMode === "vad";
+  const isContinuousMode = captureMode === "continuous";
+  const isRealtimeMode = captureMode === "realtime";
 
   return (
     <div className="rounded-lg border border-border/50 bg-muted/30 overflow-hidden">
@@ -152,7 +161,7 @@ export const SettingsPanel = ({
             </h4>
 
             {/* Sensitivity Presets - Only for VAD mode */}
-            {vadConfig.enabled && (
+            {isVadMode && (
               <div className="space-y-2">
                 <Label className="text-xs font-medium">
                   Speech Sensitivity
@@ -189,7 +198,7 @@ export const SettingsPanel = ({
             )}
 
             {/* Max Duration - Only for Manual mode */}
-            {!vadConfig.enabled && (
+            {isContinuousMode && (
               <div className="space-y-2">
                 <Label className="text-xs font-medium flex items-center justify-between">
                   <span>Max Recording Duration</span>
@@ -212,9 +221,50 @@ export const SettingsPanel = ({
                 />
               </div>
             )}
+
+            {/* Realtime transcription settings */}
+            {isRealtimeMode && (
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label className="text-xs font-medium">Transcription Model</Label>
+                  <input
+                    type="text"
+                    className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
+                    value={vadConfig.realtime_model || "gpt-realtime-whisper"}
+                    onChange={(e) =>
+                      onUpdateVadConfig({
+                        ...vadConfig,
+                        realtime_model: e.target.value,
+                      })
+                    }
+                    placeholder="gpt-realtime-whisper"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-xs font-medium">Language</Label>
+                  <input
+                    type="text"
+                    className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
+                    value={vadConfig.realtime_language || "en"}
+                    onChange={(e) =>
+                      onUpdateVadConfig({
+                        ...vadConfig,
+                        realtime_language: e.target.value,
+                      })
+                    }
+                    placeholder="en"
+                  />
+                </div>
+                <p className="text-[10px] text-muted-foreground">
+                  Uses your OpenAI API key from Dev Space → STT provider.
+                  Transcripts are saved locally; no AI responses in this mode.
+                </p>
+              </div>
+            )}
           </div>
 
-          {/* Context Section */}
+          {/* Context Section - hidden in realtime mode */}
+          {!isRealtimeMode && (
           <div className="space-y-3 pt-3 border-t border-border/50">
             <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
               AI Context
@@ -274,6 +324,7 @@ export const SettingsPanel = ({
               </div>
             )}
           </div>
+          )}
 
           {/* Advanced Settings Toggle */}
           <div className="pt-3 border-t border-border/50">
@@ -293,7 +344,7 @@ export const SettingsPanel = ({
             {showAdvanced && (
               <div className="mt-3 space-y-3">
                 {/* VAD-specific advanced settings */}
-                {vadConfig.enabled && (
+                {isVadMode && (
                   <>
                     <div className="space-y-2">
                       <Label className="text-xs font-medium flex items-center justify-between">

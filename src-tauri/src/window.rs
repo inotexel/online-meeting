@@ -71,6 +71,20 @@ pub fn center_window_completely(window: &WebviewWindow) -> Result<(), Box<dyn st
 }
 
 #[tauri::command]
+pub fn set_overlay_content_protected(
+    app: tauri::AppHandle,
+    protected: bool,
+) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or("Main window not found".to_string())?;
+
+    window
+        .set_content_protected(protected)
+        .map_err(|e| format!("Failed to set content protection: {}", e))
+}
+
+#[tauri::command]
 pub fn set_window_height(window: tauri::WebviewWindow, height: u32) -> Result<(), String> {
     use tauri::{LogicalSize, Size};
 

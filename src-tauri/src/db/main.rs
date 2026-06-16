@@ -17,5 +17,11 @@ pub fn migrations() -> Vec<Migration> {
             sql: include_str!("migrations/chat-history.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 3,
+            description: "create_realtime_transcript_tables",
+            sql: include_str!("migrations/realtime-transcripts.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }

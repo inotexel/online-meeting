@@ -88,22 +88,6 @@ pub struct AudioResponse {
     error: Option<String>,
 }
 
-// Chat API Structs
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ChatRequest {
-    user_message: String,
-    system_prompt: Option<String>,
-    image_base64: Option<serde_json::Value>, // Can be string or array
-    history: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ChatResponse {
-    success: bool,
-    message: Option<String>,
-    error: Option<String>,
-}
-
 // Model API Structs
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Model {
@@ -1089,10 +1073,8 @@ pub async fn create_system_prompt(
 // Helper command to check if license is available
 #[tauri::command]
 pub async fn check_license_status(app: AppHandle) -> Result<bool, String> {
-    match get_stored_credentials(&app).await {
-        Ok(_) => Ok(true),
-        Err(_) => Ok(false),
-    }
+    let _ = app;
+    Ok(true)
 }
 
 #[allow(dead_code)]

@@ -23,7 +23,8 @@ import { SettingsPanel } from "./SettingsPanel";
 import { PermissionFlow } from "./PermissionFlow";
 import { QuickActions } from "./QuickActions";
 import { Warning } from "./Warning";
-import { useSystemAudioType } from "@/hooks";
+import { LiveTranscript } from "./LiveTranscript";
+import { useSystemAudioType, getCaptureMode } from "@/hooks";
 import { useApp } from "@/contexts";
 import { cn } from "@/lib/utils";
 
@@ -63,6 +64,10 @@ export const SystemAudio = (props: useSystemAudioType) => {
     startContinuousRecording,
     ignoreContinuousRecording,
     scrollAreaRef,
+    isRealtimeMode,
+    isRealtimeSessionActive,
+    realtimeSegments,
+    realtimePendingDelta,
   } = props;
 
   const { hasActiveLicense, supportsImages } = useApp();
@@ -74,8 +79,9 @@ export const SystemAudio = (props: useSystemAudioType) => {
   const [screenshotImage, setScreenshotImage] = useState<string | null>(null);
   const [isCapturingScreenshot, setIsCapturingScreenshot] = useState(false);
 
-  const isVadMode = vadConfig.enabled;
-  const hasResponse = lastAIResponse || isAIProcessing;
+  const captureMode = getCaptureMode(vadConfig);
+  const isVadMode = captureMode === "vad";
+  const hasResponse = !isRealtimeMode && (lastAIResponse || isAIProcessing);
 
   // Keyboard shortcut for Cmd+K to toggle view mode
   useEffect(() => {
@@ -108,10 +114,17 @@ export const SystemAudio = (props: useSystemAudioType) => {
     }
   };
 
-  const handleModeChange = (vadEnabled: boolean) => {
+  const handleHeadphonesClick = async () => {
+    if (capturing) {
+      await stopCapture();
+    }
+  };
+
+  const handleModeChange = (mode: typeof captureMode) => {
     updateVadConfiguration({
       ...vadConfig,
-      enabled: vadEnabled,
+      capture_mode: mode,
+      enabled: mode === "vad",
     });
   };
 
@@ -169,7 +182,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
     if (error && !setupRequired) return `Error: ${error}`;
     if (isProcessing) return "Transcribing audio...";
     if (capturing) return "Stop system audio capture";
-    return "Start system audio capture";
+    return "Open system audio panel";
   };
 
   return (
@@ -180,13 +193,14 @@ export const SystemAudio = (props: useSystemAudioType) => {
           return;
         }
         setIsPopoverOpen(open);
+        resizeWindow(open);
       }}
     >
       <PopoverTrigger asChild>
         <Button
           size="icon"
           title={getButtonTitle()}
-          onClick={handleToggleCapture}
+          onClick={handleHeadphonesClick}
           className={cn(
             capturing && "bg-green-50 hover:bg-green-100",
             error && "bg-red-100 hover:bg-red-200"
@@ -196,13 +210,12 @@ export const SystemAudio = (props: useSystemAudioType) => {
         </Button>
       </PopoverTrigger>
 
-      {(capturing || setupRequired || error) && (
-        <PopoverContent
-          align="end"
-          side="bottom"
-          className="select-none w-screen p-0 border shadow-lg overflow-hidden border-input/50"
-          sideOffset={8}
-        >
+      <PopoverContent
+        align="end"
+        side="bottom"
+        className="select-none w-screen p-0 border shadow-lg overflow-hidden border-input/50"
+        sideOffset={8}
+      >
           <div className="flex flex-col h-[calc(100vh-4rem)] overflow-hidden">
             {/* Header - Mode Switcher + Actions */}
             <div className="flex-shrink-0 p-3 border-b border-border/50">
@@ -210,12 +223,13 @@ export const SystemAudio = (props: useSystemAudioType) => {
                 {/* Mode Switcher */}
                 {!setupRequired && (
                   <ModeSwitcher
-                    isVadMode={isVadMode}
+                    captureMode={captureMode}
                     onModeChange={handleModeChange}
                     disabled={
                       isRecordingInContinuousMode ||
                       isProcessing ||
-                      isAIProcessing
+                      isAIProcessing ||
+                      isRealtimeSessionActive
                     }
                   />
                 )}
@@ -225,8 +239,33 @@ export const SystemAudio = (props: useSystemAudioType) => {
 
                 {/* Action Buttons */}
                 <div className="flex items-center gap-1.5 flex-shrink-0">
+                  {!setupRequired && !capturing && (
+                    <Button
+                      size="sm"
+                      variant="default"
+                      onClick={handleToggleCapture}
+                      className="h-6 text-[10px] gap-1 px-2"
+                      title="Start listening to system audio"
+                    >
+                      <HeadphonesIcon className="w-3 h-3" />
+                      Start
+                    </Button>
+                  )}
+
+                  {!setupRequired && capturing && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleToggleCapture}
+                      className="h-6 text-[10px] gap-1 px-2"
+                      title="Stop system audio capture"
+                    >
+                      Stop
+                    </Button>
+                  )}
+
                   {/* Screenshot Button */}
-                  {hasActiveLicense && !setupRequired && supportsImages && (
+                  {hasActiveLicense && !setupRequired && supportsImages && !isRealtimeMode && (
                     <Button
                       size="sm"
                       variant={screenshotImage ? "default" : "outline"}
@@ -334,28 +373,44 @@ export const SystemAudio = (props: useSystemAudioType) => {
                   />
                 ) : (
                   <>
-                    {/* Recording Panel */}
-                    <RecordingPanel
-                      isVadMode={isVadMode}
-                      isRecording={isRecordingInContinuousMode}
-                      isProcessing={isProcessing}
-                      isAIProcessing={isAIProcessing}
-                      recordingProgress={recordingProgress}
-                      maxDuration={vadConfig.max_recording_duration_secs}
-                      onStartRecording={startContinuousRecording}
-                      onStopAndSend={manualStopAndSend}
-                      onIgnore={ignoreContinuousRecording}
-                    />
+                    {/* Recording Panel (manual mode only) */}
+                    {!isRealtimeMode && (
+                      <RecordingPanel
+                        isVadMode={isVadMode}
+                        isRecording={isRecordingInContinuousMode}
+                        isProcessing={isProcessing}
+                        isAIProcessing={isAIProcessing}
+                        recordingProgress={recordingProgress}
+                        maxDuration={vadConfig.max_recording_duration_secs}
+                        onStartRecording={startContinuousRecording}
+                        onStopAndSend={manualStopAndSend}
+                        onIgnore={ignoreContinuousRecording}
+                      />
+                    )}
 
-                    {/* AI Response */}
-                    <ResultsSection
-                      lastTranscription={lastTranscription}
-                      lastAIResponse={lastAIResponse}
-                      isAIProcessing={isAIProcessing}
-                      conversation={conversation}
-                      conversationMode={conversationMode}
-                      setConversationMode={setConversationMode}
-                    />
+                    {/* Live transcript (realtime mode) */}
+                    {captureMode === "realtime" && (
+                      <div className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm pb-2">
+                        <LiveTranscript
+                          segments={realtimeSegments}
+                          pendingDelta={realtimePendingDelta}
+                          isSessionActive={isRealtimeSessionActive}
+                          isCapturing={capturing}
+                        />
+                      </div>
+                    )}
+
+                    {/* AI Response (not shown in realtime mode) */}
+                    {!isRealtimeMode && (
+                      <ResultsSection
+                        lastTranscription={lastTranscription}
+                        lastAIResponse={lastAIResponse}
+                        isAIProcessing={isAIProcessing}
+                        conversation={conversation}
+                        conversationMode={conversationMode}
+                        setConversationMode={setConversationMode}
+                      />
+                    )}
 
                     {/* Settings Panel */}
                     <SettingsPanel
@@ -365,10 +420,11 @@ export const SystemAudio = (props: useSystemAudioType) => {
                       setUseSystemPrompt={setUseSystemPrompt}
                       contextContent={contextContent}
                       setContextContent={setContextContent}
+                      captureMode={captureMode}
                     />
 
                     {/* Help/Keyboard Shortcuts */}
-                    <Warning isVadMode={isVadMode} />
+                    <Warning captureMode={captureMode} />
                   </>
                 )}
               </div>
@@ -391,7 +447,6 @@ export const SystemAudio = (props: useSystemAudioType) => {
             )}
           </div>
         </PopoverContent>
-      )}
     </Popover>
   );
 };

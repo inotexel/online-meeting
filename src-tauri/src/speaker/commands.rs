@@ -1,5 +1,5 @@
 // Pluely AI Speech Detection, and capture system audio (speaker output) as a stream of f32 samples.
-use crate::speaker::{AudioDevice, SpeakerInput};
+use crate::speaker::{realtime::RealtimeConfig, AudioDevice, SpeakerInput};
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use futures_util::StreamExt;
@@ -18,6 +18,8 @@ use tracing::{error, warn};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VadConfig {
     pub enabled: bool,
+    #[serde(default)]
+    pub capture_mode: Option<String>,
     pub hop_size: usize,
     pub sensitivity_rms: f32,
     pub peak_threshold: f32,
@@ -26,12 +28,17 @@ pub struct VadConfig {
     pub pre_speech_chunks: usize,
     pub noise_gate_threshold: f32,
     pub max_recording_duration_secs: u64,
+    #[serde(default)]
+    pub realtime_model: Option<String>,
+    #[serde(default)]
+    pub realtime_language: Option<String>,
 }
 
 impl Default for VadConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            capture_mode: None,
             hop_size: 1024,
             sensitivity_rms: 0.012, // Much less sensitive - only real speech
             peak_threshold: 0.035,  // Higher threshold - filters clicks/noise
@@ -40,7 +47,21 @@ impl Default for VadConfig {
             pre_speech_chunks: 12,  // ~0.27s - enough to catch word start
             noise_gate_threshold: 0.003, // Stronger noise filtering
             max_recording_duration_secs: 180, // 3 minutes default
+            realtime_model: Some("gpt-realtime-whisper".to_string()),
+            realtime_language: Some("en".to_string()),
         }
+    }
+}
+
+fn resolve_capture_mode(vad_config: &VadConfig) -> &str {
+    if let Some(mode) = vad_config.capture_mode.as_deref() {
+        return mode;
+    }
+
+    if vad_config.enabled {
+        "vad"
+    } else {
+        "continuous"
     }
 }
 
@@ -49,6 +70,7 @@ pub async fn start_system_audio_capture(
     app: AppHandle,
     vad_config: Option<VadConfig>,
     device_id: Option<String>,
+    realtime_config: Option<RealtimeConfig>,
 ) -> Result<(), String> {
     let state = app.state::<crate::AudioState>();
 
@@ -97,6 +119,7 @@ pub async fn start_system_audio_capture(
         .lock()
         .map_err(|e| format!("Failed to read VAD config: {}", e))?
         .clone();
+    let capture_mode = resolve_capture_mode(&vad_config).to_string();
 
     // Mark as capturing BEFORE spawning task
     *state
@@ -109,18 +132,54 @@ pub async fn start_system_audio_capture(
 
     let state_clone = app.state::<crate::AudioState>();
     let task = tokio::spawn(async move {
-        if vad_config.enabled {
-            run_vad_capture(app_clone.clone(), stream, sr, vad_config).await;
-        } else {
-            run_continuous_capture(app_clone.clone(), stream, sr, vad_config).await;
+        match capture_mode.as_str() {
+            "realtime" => {
+                let realtime_cfg = match realtime_config {
+                    Some(cfg) if !cfg.api_key.is_empty() => cfg,
+                    _ => {
+                        let _ = app_clone.emit(
+                            "realtime-transcription-error",
+                            "OpenAI API key is required for realtime transcription",
+                        );
+                        let state = app_clone.state::<crate::AudioState>();
+                        if let Ok(mut guard) = state.stream_task.lock() {
+                            *guard = None;
+                        }
+                        *state
+                            .is_capturing
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+                        let _ = app_clone.emit("capture-stopped", ());
+                        return;
+                    }
+                };
+                crate::speaker::realtime::run_realtime_capture(
+                    app_clone.clone(),
+                    stream,
+                    sr,
+                    realtime_cfg,
+                )
+                .await;
+            }
+            "continuous" => {
+                run_continuous_capture(app_clone.clone(), stream, sr, vad_config).await;
+            }
+            _ => {
+                run_vad_capture(app_clone.clone(), stream, sr, vad_config).await;
+            }
         }
 
         let state = app_clone.state::<crate::AudioState>();
         {
             if let Ok(mut guard) = state.stream_task.lock() {
                 *guard = None;
-            };
+            }
+            *state
+                .is_capturing
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
         }
+        let _ = app_clone.emit("capture-stopped", ());
     });
 
     *state_clone

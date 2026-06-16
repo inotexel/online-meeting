@@ -3,6 +3,7 @@ import {
   AlwaysOnTopToggle,
   AppIconToggle,
   AutostartToggle,
+  HideFromCaptureToggle,
 } from "./components";
 import { PageLayout } from "@/layouts";
 
@@ -20,6 +21,9 @@ const Settings = () => {
 
       {/* Always On Top Toggle */}
       <AlwaysOnTopToggle />
+
+      {/* Screen Share & Recording */}
+      <HideFromCaptureToggle />
     </PageLayout>
   );
 };

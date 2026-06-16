@@ -1,0 +1,4 @@
+# MSVC /PDB:NONE writes a linker artifact named "NONE" in src-tauri.
+# Without this ignore, `tauri dev` rebuilds forever on that file.
+NONE
+src-tauri/NONE

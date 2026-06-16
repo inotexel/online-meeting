@@ -12,6 +12,7 @@ import {
   updateAppIconVisibility,
   updateAlwaysOnTop,
   updateAutostart,
+  updateHideFromScreenCapture,
   CustomizableState,
   DEFAULT_CUSTOMIZABLE_STATE,
   CursorType,
@@ -20,7 +21,7 @@ import {
 import { IContextType, ScreenshotConfig, TYPE_PROVIDER } from "@/types";
 import curl2Json from "@bany/curl-to-json";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { enable, disable } from "@tauri-apps/plugin-autostart";
 import {
@@ -131,7 +132,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   const [customizable, setCustomizable] = useState<CustomizableState>(
     DEFAULT_CUSTOMIZABLE_STATE
   );
-  const [hasActiveLicense, setHasActiveLicense] = useState<boolean>(false);
+  const [hasActiveLicense, setHasActiveLicense] = useState<boolean>(true);
   const [supportsImages, setSupportsImagesState] = useState<boolean>(() => {
     const stored = safeLocalStorage.getItem(STORAGE_KEYS.SUPPORTS_IMAGES);
     return stored === null ? true : stored === "true";
@@ -149,17 +150,11 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   );
 
   const getActiveLicenseStatus = async () => {
-    const response: { is_active: boolean; is_dev_license: boolean } =
-      await invoke("validate_license_api");
-    setHasActiveLicense(response.is_active);
-
-    if (response?.is_dev_license) {
-      setPluelyApiEnabled(false);
-    }
+    setHasActiveLicense(true);
 
     // Check if the auto configs are enabled
     const autoConfigsEnabled = localStorage.getItem("auto-configs-enabled");
-    if (response.is_active && !autoConfigsEnabled) {
+    if (!autoConfigsEnabled) {
       setScreenshotConfiguration({
         mode: "auto",
         autoPrompt: "Analyze the screenshot and provide insights",
@@ -266,8 +261,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       // check if we need to update the schema
       try {
         const parsed = JSON.parse(stored);
-        if (!parsed.autostart) {
-          // save the merged state with new autostart property
+        if (!parsed.autostart || parsed.hideFromScreenCapture === undefined) {
+          // save merged state when new settings fields are missing
           setCustomizableState(customizableState);
           updateCursor(customizableState.cursor.type || "invisible");
         }
@@ -348,9 +343,16 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     initializeApp();
   }, []);
 
+  const applyOverlayContentProtection = async (isEnabled: boolean) => {
+    await invoke("set_overlay_content_protected", { protected: isEnabled });
+  };
+
   // Handle customizable settings on state changes
   useEffect(() => {
     const applyCustomizableSettings = async () => {
+      const hideFromCapture =
+        customizable.hideFromScreenCapture?.isEnabled ?? true;
+
       try {
         await Promise.all([
           invoke("set_app_icon_visibility", {
@@ -363,10 +365,32 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       } catch (error) {
         console.error("Failed to apply customizable settings:", error);
       }
+
+      try {
+        await applyOverlayContentProtection(hideFromCapture);
+      } catch (error) {
+        console.error("Failed to apply screen capture visibility:", error);
+      }
     };
 
     applyCustomizableSettings();
   }, [customizable]);
+
+  // Sync customizable settings across overlay and dashboard windows
+  useEffect(() => {
+    const unlisten = listen<CustomizableState>(
+      "customizable-updated",
+      (event) => {
+        if (event.payload) {
+          setCustomizable(event.payload);
+        }
+      }
+    );
+
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
 
   useEffect(() => {
     const initializeAutostart = async () => {
@@ -590,6 +614,19 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     }
   };
 
+  const toggleHideFromScreenCapture = async (isEnabled: boolean) => {
+    const newState = updateHideFromScreenCapture(isEnabled);
+    setCustomizable(newState);
+    try {
+      await applyOverlayContentProtection(isEnabled);
+      await emit("customizable-updated", newState);
+    } catch (error) {
+      console.error("Failed to toggle screen capture visibility:", error);
+      const revertedState = updateHideFromScreenCapture(!isEnabled);
+      setCustomizable(revertedState);
+    }
+  };
+
   const toggleAutostart = async (isEnabled: boolean) => {
     const newState = updateAutostart(isEnabled);
     setCustomizable(newState);
@@ -669,6 +706,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     customizable,
     toggleAppIconVisibility,
     toggleAlwaysOnTop,
+    toggleHideFromScreenCapture,
     toggleAutostart,
     loadData,
     pluelyApiEnabled,

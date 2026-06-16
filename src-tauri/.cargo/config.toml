@@ -1,0 +1,9 @@
+# Store Rust build artifacts on D: to avoid filling C:
+[build]
+target-dir = "D:/cargo-target/pluely"
+
+# Large Tauri apps can exceed MSVC's PDB limit during debug links (LNK1140).
+# /PDB:NONE disables PDB output; MSVC may create a file literally named "NONE"
+# in src-tauri — see /.taurignore so `tauri dev` does not rebuild in a loop.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/PDB:NONE"]

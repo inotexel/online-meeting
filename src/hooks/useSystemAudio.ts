@@ -18,11 +18,19 @@ import {
   generateConversationId,
   generateMessageId,
 } from "@/lib";
+import {
+  createRealtimeSession,
+  endRealtimeSession,
+  saveRealtimeTranscriptSegment,
+} from "@/lib/database";
 import { Message } from "@/types/completion";
+
+export type CaptureMode = "vad" | "continuous" | "realtime";
 
 // VAD Configuration interface matching Rust
 export interface VadConfig {
   enabled: boolean;
+  capture_mode?: CaptureMode | null;
   hop_size: number;
   sensitivity_rms: number;
   peak_threshold: number;
@@ -31,6 +39,8 @@ export interface VadConfig {
   pre_speech_chunks: number;
   noise_gate_threshold: number;
   max_recording_duration_secs: number;
+  realtime_model?: string | null;
+  realtime_language?: string | null;
 }
 
 // OPTIMIZED VAD defaults - matches backend exactly for perfect performance
@@ -44,7 +54,28 @@ const DEFAULT_VAD_CONFIG: VadConfig = {
   pre_speech_chunks: 12, // ~0.27s - enough to catch word start
   noise_gate_threshold: 0.003, // Stronger noise filtering
   max_recording_duration_secs: 180, // 3 minutes default
+  realtime_model: "gpt-realtime-whisper",
+  realtime_language: "en",
 };
+
+export function getCaptureMode(config: VadConfig): CaptureMode {
+  if (config.capture_mode) {
+    return config.capture_mode;
+  }
+  return config.enabled ? "vad" : "continuous";
+}
+
+function getSttApiKey(variables: Record<string, string>): string {
+  for (const [key, value] of Object.entries(variables)) {
+    if (
+      key.toUpperCase().includes("API_KEY") ||
+      key.toLowerCase() === "api_key"
+    ) {
+      return value?.trim() ?? "";
+    }
+  }
+  return "";
+}
 
 // Chat message interface (reusing from useCompletion)
 interface ChatMessage {
@@ -85,6 +116,19 @@ export function useSystemAudio() {
   const [isContinuousMode, setIsContinuousMode] = useState<boolean>(false);
   const [isRecordingInContinuousMode, setIsRecordingInContinuousMode] =
     useState<boolean>(false);
+  const [isRealtimeMode, setIsRealtimeMode] = useState<boolean>(false);
+  const [isRealtimeSessionActive, setIsRealtimeSessionActive] =
+    useState<boolean>(false);
+  const [realtimeSegments, setRealtimeSegments] = useState<
+    { id: string; text: string; isFinal: boolean }[]
+  >([]);
+  const [realtimePendingDelta, setRealtimePendingDelta] = useState("");
+  const realtimeSessionIdRef = useRef<string>("");
+  const realtimeSequenceRef = useRef(0);
+  const realtimeFinalItemIdsRef = useRef<Set<string>>(new Set());
+  const realtimePendingByItemRef = useRef<Record<string, string>>({});
+  const captureModeRef = useRef<CaptureMode>(getCaptureMode(DEFAULT_VAD_CONFIG));
+  const isRestartingCaptureRef = useRef(false);
 
   const [conversation, setConversation] = useState<ChatConversation>({
     id: "",
@@ -132,6 +176,7 @@ export function useSystemAudio() {
       try {
         const parsed = JSON.parse(savedVadConfig);
         setVadConfig(parsed);
+        captureModeRef.current = getCaptureMode(parsed);
       } catch (error) {
         console.error("Failed to load VAD config:", error);
       }
@@ -216,7 +261,139 @@ export function useSystemAudio() {
     };
   }, []);
 
-  // Handle single speech detection event (both VAD and continuous modes)
+  const syncRealtimePendingDelta = useCallback(() => {
+    const pending = Object.values(realtimePendingByItemRef.current)
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+    setRealtimePendingDelta(pending);
+  }, []);
+
+  const clearRealtimePending = useCallback(() => {
+    realtimePendingByItemRef.current = {};
+    setRealtimePendingDelta("");
+  }, []);
+
+  // Realtime transcription event listeners
+  useEffect(() => {
+    let cancelled = false;
+    const unlisteners: Array<() => void> = [];
+
+    const registerListener = async (
+      event: string,
+      handler: Parameters<typeof listen>[1]
+    ) => {
+      const unlisten = await listen(event, handler);
+      if (cancelled) {
+        unlisten();
+        return;
+      }
+      unlisteners.push(unlisten);
+    };
+
+    const setupRealtimeListeners = async () => {
+      try {
+        await registerListener("transcript-delta", (event) => {
+          const payload = event.payload as { delta: string; itemId?: string };
+          if (!payload.delta) return;
+
+          const itemKey = payload.itemId ?? "default";
+          realtimePendingByItemRef.current[itemKey] =
+            (realtimePendingByItemRef.current[itemKey] ?? "") + payload.delta;
+          syncRealtimePendingDelta();
+        });
+
+        await registerListener("transcript-final", async (event) => {
+          const payload = event.payload as {
+            transcript: string;
+            itemId?: string;
+          };
+          const text = payload.transcript?.trim();
+          if (!text) return;
+
+          if (payload.itemId) {
+            if (realtimeFinalItemIdsRef.current.has(payload.itemId)) return;
+            realtimeFinalItemIdsRef.current.add(payload.itemId);
+          }
+
+          const itemKey = payload.itemId ?? "default";
+          delete realtimePendingByItemRef.current[itemKey];
+          syncRealtimePendingDelta();
+
+          const sessionId = realtimeSessionIdRef.current;
+          const segmentId = `rtseg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+          const sequenceNum = realtimeSequenceRef.current++;
+
+          setRealtimeSegments((prev) => {
+            if (
+              payload.itemId &&
+              prev.some((segment) => segment.id === payload.itemId)
+            ) {
+              return prev;
+            }
+            return [
+              ...prev,
+              {
+                id: payload.itemId ?? segmentId,
+                text,
+                isFinal: true,
+              },
+            ];
+          });
+          setLastTranscription(text);
+
+          if (sessionId) {
+            try {
+              await saveRealtimeTranscriptSegment({
+                id: segmentId,
+                sessionId,
+                text,
+                isFinal: true,
+                itemId: payload.itemId ?? null,
+                sequenceNum,
+              });
+            } catch (err) {
+              console.error("Failed to save realtime segment:", err);
+            }
+          }
+        });
+
+        await registerListener("realtime-session-started", () => {
+          realtimeFinalItemIdsRef.current.clear();
+          setIsRealtimeSessionActive(true);
+        });
+
+        await registerListener("realtime-session-stopped", async () => {
+          setIsRealtimeSessionActive(false);
+          const sessionId = realtimeSessionIdRef.current;
+          if (sessionId) {
+            try {
+              await endRealtimeSession(sessionId);
+            } catch (err) {
+              console.error("Failed to end realtime session:", err);
+            }
+          }
+        });
+
+        await registerListener("realtime-transcription-error", (event) => {
+          const message = event.payload as string;
+          setError(message || "Realtime transcription error");
+          setIsRealtimeSessionActive(false);
+        });
+      } catch (err) {
+        console.error("Failed to setup realtime listeners:", err);
+      }
+    };
+
+    setupRealtimeListeners();
+
+    return () => {
+      cancelled = true;
+      unlisteners.forEach((unlisten) => unlisten());
+    };
+  }, [syncRealtimePendingDelta]);
+
+  // Handle single speech detection event (VAD and continuous modes only)
   useEffect(() => {
     let speechUnlisten: (() => void) | undefined;
 
@@ -225,6 +402,7 @@ export function useSystemAudio() {
         speechUnlisten = await listen("speech-detected", async (event) => {
           try {
             if (!capturing) return;
+            if (getCaptureMode(vadConfig) === "realtime") return;
 
             const base64Audio = event.payload as string;
             // Convert to blob
@@ -318,7 +496,35 @@ export function useSystemAudio() {
     selectedSttProvider,
     allSttProviders,
     conversation.messages.length,
+    vadConfig,
   ]);
+
+  const buildCaptureInvokeArgs = useCallback(
+    (config: VadConfig) => {
+      const deviceId =
+        selectedAudioDevices.output.id !== "default"
+          ? selectedAudioDevices.output.id
+          : null;
+
+      const mode = getCaptureMode(config);
+      const args: Record<string, unknown> = {
+        vadConfig: config,
+        deviceId,
+      };
+
+      if (mode === "realtime") {
+        const apiKey = getSttApiKey(selectedSttProvider.variables);
+        args.realtimeConfig = {
+          api_key: apiKey,
+          model: config.realtime_model || "gpt-realtime-whisper",
+          language: config.realtime_language || "en",
+        };
+      }
+
+      return { args, deviceId, mode };
+    },
+    [selectedAudioDevices.output.id, selectedSttProvider.variables]
+  );
 
   // Context management functions
   const saveContextSettings = useCallback(
@@ -438,16 +644,93 @@ export function useSystemAudio() {
           ? selectedAudioDevices.output.id
           : null;
 
-      // Start a new continuous recording session
       await invoke<string>("start_system_audio_capture", {
-        vadConfig: vadConfig,
-        deviceId: deviceId,
+        vadConfig,
+        deviceId,
       });
     } catch (err) {
       console.error("Failed to start continuous recording:", err);
       setError(`Failed to start recording: ${err}`);
     }
   }, [vadConfig, selectedAudioDevices.output.id]);
+
+  const startRealtimeCapture = useCallback(async () => {
+    setError("");
+    const apiKey = getSttApiKey(selectedSttProvider.variables);
+    if (!apiKey) {
+      setError(
+        "OpenAI API key required. Configure it in Dev Space → STT provider."
+      );
+      throw new Error("OpenAI API key required");
+    }
+
+    const sessionId = `realtime_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    realtimeSessionIdRef.current = sessionId;
+    realtimeSequenceRef.current = 0;
+    realtimeFinalItemIdsRef.current.clear();
+    setRealtimeSegments([]);
+    clearRealtimePending();
+
+    const deviceId =
+      selectedAudioDevices.output.id !== "default"
+        ? selectedAudioDevices.output.id
+        : null;
+
+    await createRealtimeSession(sessionId, deviceId);
+
+    await invoke<string>("start_system_audio_capture", {
+      vadConfig,
+      deviceId,
+      realtimeConfig: {
+        api_key: apiKey,
+        model: vadConfig.realtime_model || "gpt-realtime-whisper",
+        language: vadConfig.realtime_language || "en",
+      },
+    });
+  }, [
+    vadConfig,
+    selectedAudioDevices.output.id,
+    selectedSttProvider.variables,
+    clearRealtimePending,
+  ]);
+
+  const restartCaptureForMode = useCallback(
+    async (config: VadConfig) => {
+      if (isRestartingCaptureRef.current) return;
+      isRestartingCaptureRef.current = true;
+
+      try {
+        const mode = getCaptureMode(config);
+        setIsContinuousMode(mode === "continuous");
+        setIsRealtimeMode(mode === "realtime");
+        setIsRealtimeSessionActive(false);
+        realtimeFinalItemIdsRef.current.clear();
+        setRealtimeSegments([]);
+        clearRealtimePending();
+        setIsRecordingInContinuousMode(false);
+        setRecordingProgress(0);
+        setError("");
+
+        await invoke("stop_system_audio_capture");
+
+        if (mode === "realtime") {
+          await startRealtimeCapture();
+        } else if (mode === "vad") {
+          const { args } = buildCaptureInvokeArgs(config);
+          await invoke<string>("start_system_audio_capture", args);
+        }
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        setError(`Failed to switch mode: ${errorMessage}`);
+        setCapturing(false);
+        setIsRealtimeMode(false);
+        setIsContinuousMode(false);
+      } finally {
+        isRestartingCaptureRef.current = false;
+      }
+    },
+    [buildCaptureInvokeArgs, startRealtimeCapture, clearRealtimePending]
+  );
 
   // Ignore current recording (stop without transcription)
   const ignoreContinuousRecording = useCallback(async () => {
@@ -561,7 +844,21 @@ export function useSystemAudio() {
         return;
       }
 
-      const isContinuous = !vadConfig.enabled;
+      const mode = getCaptureMode(vadConfig);
+      captureModeRef.current = mode;
+      const isContinuous = mode === "continuous";
+      const isRealtime = mode === "realtime";
+
+      if (isRealtime) {
+        const apiKey = getSttApiKey(selectedSttProvider.variables);
+        if (!apiKey) {
+          setError(
+            "OpenAI API key required. Configure it in Dev Space → STT provider."
+          );
+          setIsPopoverOpen(true);
+          return;
+        }
+      }
 
       // Set up conversation
       const conversationId = generateConversationId("sysaudio");
@@ -576,34 +873,45 @@ export function useSystemAudio() {
       setCapturing(true);
       setIsPopoverOpen(true);
       setIsContinuousMode(isContinuous);
+      setIsRealtimeMode(isRealtime);
       setRecordingProgress(0);
+      setRealtimeSegments([]);
+      setRealtimePendingDelta("");
 
-      // If continuous mode
       if (isContinuous) {
         setIsRecordingInContinuousMode(false);
         return;
       }
 
+      if (isRealtime) {
+        try {
+          await startRealtimeCapture();
+        } catch (err) {
+          const errorMessage =
+            err instanceof Error ? err.message : String(err);
+          setError(errorMessage);
+          setCapturing(false);
+          setIsRealtimeMode(false);
+        }
+        return;
+      }
+
       // VAD mode: Start recording immediately
-      // Stop any existing capture
       await invoke<string>("stop_system_audio_capture");
 
-      const deviceId =
-        selectedAudioDevices.output.id !== "default"
-          ? selectedAudioDevices.output.id
-          : null;
-
-      // Start capture with VAD config
-      await invoke<string>("start_system_audio_capture", {
-        vadConfig: vadConfig,
-        deviceId: deviceId,
-      });
+      const { args } = buildCaptureInvokeArgs(vadConfig);
+      await invoke<string>("start_system_audio_capture", args);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       setError(errorMessage);
       setIsPopoverOpen(true);
     }
-  }, [vadConfig, selectedAudioDevices.output.id]);
+  }, [
+    vadConfig,
+    selectedSttProvider.variables,
+    buildCaptureInvokeArgs,
+    startRealtimeCapture,
+  ]);
 
   const stopCapture = useCallback(async () => {
     try {
@@ -621,8 +929,14 @@ export function useSystemAudio() {
       setIsProcessing(false);
       setIsAIProcessing(false);
       setIsContinuousMode(false);
+      setIsRealtimeMode(false);
+      setIsRealtimeSessionActive(false);
       setIsRecordingInContinuousMode(false);
       setRecordingProgress(0);
+      realtimeFinalItemIdsRef.current.clear();
+      setRealtimeSegments([]);
+      clearRealtimePending();
+      realtimeSessionIdRef.current = "";
       setLastTranscription("");
       setLastAIResponse("");
       setError("");
@@ -632,7 +946,7 @@ export function useSystemAudio() {
       setError(`Failed to stop capture: ${errorMessage}`);
       console.error("Stop capture error:", err);
     }
-  }, []);
+  }, [clearRealtimePending]);
 
   // Manual stop for continuous recording
   const manualStopAndSend = useCallback(async () => {
@@ -681,14 +995,16 @@ export function useSystemAudio() {
   }, [startCapture]);
 
   useEffect(() => {
-    const shouldOpenPopover =
+    const shouldAutoOpen =
       capturing ||
       setupRequired ||
       isAIProcessing ||
       !!lastAIResponse ||
       !!error;
-    setIsPopoverOpen(shouldOpenPopover);
-    resizeWindow(shouldOpenPopover);
+    if (shouldAutoOpen) {
+      setIsPopoverOpen(true);
+      resizeWindow(true);
+    }
   }, [
     capturing,
     setupRequired,
@@ -793,14 +1109,40 @@ export function useSystemAudio() {
   }, []);
 
   useEffect(() => {
-    if (capturing) {
-      setIsContinuousMode(!vadConfig.enabled);
+    const mode = getCaptureMode(vadConfig);
+    const prevMode = captureModeRef.current;
+    captureModeRef.current = mode;
 
-      if (!vadConfig.enabled) {
-        setIsRecordingInContinuousMode(false);
-      }
+    if (!capturing) {
+      setIsContinuousMode(mode === "continuous");
+      setIsRealtimeMode(mode === "realtime");
+      return;
     }
-  }, [vadConfig.enabled, capturing]);
+
+    setIsContinuousMode(mode === "continuous");
+    setIsRealtimeMode(mode === "realtime");
+
+    if (mode === "continuous") {
+      setIsRecordingInContinuousMode(false);
+    }
+
+    if (prevMode !== mode) {
+      restartCaptureForMode(vadConfig);
+    }
+  }, [vadConfig, capturing, restartCaptureForMode]);
+
+  const scrollRealtimeIntoView = useCallback(() => {
+    const scrollElement = scrollAreaRef.current?.querySelector(
+      "[data-slot='scroll-area-viewport']"
+    ) as HTMLElement | null;
+    if (!scrollElement) return;
+    scrollElement.scrollTop = scrollElement.scrollHeight;
+  }, []);
+
+  useEffect(() => {
+    if (!isRealtimeMode) return;
+    scrollRealtimeIntoView();
+  }, [isRealtimeMode, realtimeSegments, realtimePendingDelta, scrollRealtimeIntoView]);
 
   // Keyboard arrow key support for scrolling (local shortcut)
   useEffect(() => {
@@ -808,7 +1150,7 @@ export function useSystemAudio() {
       if (!isPopoverOpen) return;
 
       const scrollElement = scrollAreaRef.current?.querySelector(
-        "[data-radix-scroll-area-viewport]"
+        "[data-slot='scroll-area-viewport']"
       ) as HTMLElement;
 
       if (!scrollElement) return;
@@ -922,6 +1264,11 @@ export function useSystemAudio() {
     manualStopAndSend,
     startContinuousRecording,
     ignoreContinuousRecording,
+    // Realtime transcription
+    isRealtimeMode,
+    isRealtimeSessionActive,
+    realtimeSegments,
+    realtimePendingDelta,
     // Scroll area ref for keyboard navigation
     scrollAreaRef,
   };
