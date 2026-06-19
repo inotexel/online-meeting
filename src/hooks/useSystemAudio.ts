@@ -24,6 +24,7 @@ import {
   saveRealtimeTranscriptSegment,
 } from "@/lib/database";
 import { Message } from "@/types/completion";
+import { TYPE_PROVIDER } from "@/types/provider.type";
 
 export type CaptureMode = "vad" | "continuous" | "realtime";
 
@@ -41,6 +42,10 @@ export interface VadConfig {
   max_recording_duration_secs: number;
   realtime_model?: string | null;
   realtime_language?: string | null;
+  realtime_speaker_labels?: boolean | null;
+  realtime_max_speakers?: number | null;
+  realtime_assemblyai_model?: string | null;
+  assemblyai_api_key?: string | null;
 }
 
 // OPTIMIZED VAD defaults - matches backend exactly for perfect performance
@@ -56,6 +61,10 @@ const DEFAULT_VAD_CONFIG: VadConfig = {
   max_recording_duration_secs: 180, // 3 minutes default
   realtime_model: "gpt-realtime-whisper",
   realtime_language: "en",
+  realtime_speaker_labels: false,
+  realtime_max_speakers: 5,
+  realtime_assemblyai_model: "universal-streaming-english",
+  assemblyai_api_key: "",
 };
 
 export function getCaptureMode(config: VadConfig): CaptureMode {
@@ -75,6 +84,57 @@ function getSttApiKey(variables: Record<string, string>): string {
     }
   }
   return "";
+}
+
+function isAssemblyAiProvider(provider: TYPE_PROVIDER): boolean {
+  const curl = provider.curl?.toLowerCase() ?? "";
+  const id = provider.id?.toLowerCase() ?? "";
+  return curl.includes("assemblyai.com") || id.includes("assemblyai");
+}
+
+function getAssemblyAiApiKey(
+  config: VadConfig,
+  providerId: string | undefined,
+  variables: Record<string, string>,
+  allProviders: TYPE_PROVIDER[]
+): string {
+  if (config.assemblyai_api_key?.trim()) {
+    return config.assemblyai_api_key.trim();
+  }
+
+  const selected = allProviders.find((p) => p.id === providerId);
+  if (selected && isAssemblyAiProvider(selected)) {
+    return getSttApiKey(variables);
+  }
+
+  return "";
+}
+
+function buildRealtimeProviderConfigs(
+  config: VadConfig,
+  providerId: string | undefined,
+  variables: Record<string, string>,
+  allProviders: TYPE_PROVIDER[]
+) {
+  if (config.realtime_speaker_labels) {
+    return {
+      assemblyaiConfig: {
+        apiKey: getAssemblyAiApiKey(config, providerId, variables, allProviders),
+        speechModel:
+          config.realtime_assemblyai_model || "universal-streaming-english",
+        maxSpeakers: config.realtime_max_speakers || 5,
+      },
+    };
+  }
+
+  return {
+    realtimeConfig: {
+      provider: "openai",
+      apiKey: getSttApiKey(variables),
+      model: config.realtime_model || "gpt-realtime-whisper",
+      language: config.realtime_language || "en",
+    },
+  };
 }
 
 // Chat message interface (reusing from useCompletion)
@@ -120,14 +180,21 @@ export function useSystemAudio() {
   const [isRealtimeSessionActive, setIsRealtimeSessionActive] =
     useState<boolean>(false);
   const [realtimeSegments, setRealtimeSegments] = useState<
-    { id: string; text: string; isFinal: boolean }[]
+    { id: string; text: string; isFinal: boolean; speakerLabel?: string | null }[]
   >([]);
   const [realtimePendingDelta, setRealtimePendingDelta] = useState("");
+  const [realtimePendingSpeakerLabel, setRealtimePendingSpeakerLabel] =
+    useState<string | null>(null);
   const realtimeSessionIdRef = useRef<string>("");
   const realtimeSequenceRef = useRef(0);
   const realtimeFinalItemIdsRef = useRef<Set<string>>(new Set());
-  const realtimePendingByItemRef = useRef<Record<string, string>>({});
+  const realtimePendingByItemRef = useRef<
+    Record<string, { text: string; speakerLabel?: string | null }>
+  >({});
   const captureModeRef = useRef<CaptureMode>(getCaptureMode(DEFAULT_VAD_CONFIG));
+  const realtimeSpeakerLabelsRef = useRef<boolean>(
+    DEFAULT_VAD_CONFIG.realtime_speaker_labels ?? false
+  );
   const isRestartingCaptureRef = useRef(false);
 
   const [conversation, setConversation] = useState<ChatConversation>({
@@ -262,16 +329,21 @@ export function useSystemAudio() {
   }, []);
 
   const syncRealtimePendingDelta = useCallback(() => {
-    const pending = Object.values(realtimePendingByItemRef.current)
+    const entries = Object.values(realtimePendingByItemRef.current);
+    const pending = entries
+      .map((entry) => entry.text)
       .filter(Boolean)
       .join(" ")
       .trim();
+    const latestEntry = [...entries].reverse().find((entry) => entry.text.trim());
     setRealtimePendingDelta(pending);
+    setRealtimePendingSpeakerLabel(latestEntry?.speakerLabel ?? null);
   }, []);
 
   const clearRealtimePending = useCallback(() => {
     realtimePendingByItemRef.current = {};
     setRealtimePendingDelta("");
+    setRealtimePendingSpeakerLabel(null);
   }, []);
 
   // Realtime transcription event listeners
@@ -294,12 +366,24 @@ export function useSystemAudio() {
     const setupRealtimeListeners = async () => {
       try {
         await registerListener("transcript-delta", (event) => {
-          const payload = event.payload as { delta: string; itemId?: string };
+          const payload = event.payload as {
+            delta: string;
+            itemId?: string;
+            replace?: boolean;
+            speakerLabel?: string;
+          };
           if (!payload.delta) return;
 
           const itemKey = payload.itemId ?? "default";
-          realtimePendingByItemRef.current[itemKey] =
-            (realtimePendingByItemRef.current[itemKey] ?? "") + payload.delta;
+          const current = realtimePendingByItemRef.current[itemKey] ?? {
+            text: "",
+          };
+          realtimePendingByItemRef.current[itemKey] = {
+            text: payload.replace
+              ? payload.delta
+              : `${current.text}${payload.delta}`,
+            speakerLabel: payload.speakerLabel ?? current.speakerLabel ?? null,
+          };
           syncRealtimePendingDelta();
         });
 
@@ -307,6 +391,7 @@ export function useSystemAudio() {
           const payload = event.payload as {
             transcript: string;
             itemId?: string;
+            speakerLabel?: string;
           };
           const text = payload.transcript?.trim();
           if (!text) return;
@@ -337,6 +422,7 @@ export function useSystemAudio() {
                 id: payload.itemId ?? segmentId,
                 text,
                 isFinal: true,
+                speakerLabel: payload.speakerLabel ?? null,
               },
             ];
           });
@@ -351,11 +437,34 @@ export function useSystemAudio() {
                 isFinal: true,
                 itemId: payload.itemId ?? null,
                 sequenceNum,
+                speakerLabel: payload.speakerLabel ?? null,
               });
             } catch (err) {
               console.error("Failed to save realtime segment:", err);
             }
           }
+        });
+
+        await registerListener("transcript-speaker-revision", (event) => {
+          const payload = event.payload as {
+            turnOrder: number;
+            speakerLabel?: string | null;
+            transcript?: string | null;
+          };
+          const itemId = `turn_${payload.turnOrder}`;
+
+          setRealtimeSegments((prev) =>
+            prev.map((segment) =>
+              segment.id === itemId
+                ? {
+                    ...segment,
+                    speakerLabel:
+                      payload.speakerLabel ?? segment.speakerLabel ?? null,
+                    text: payload.transcript?.trim() || segment.text,
+                  }
+                : segment
+            )
+          );
         });
 
         await registerListener("realtime-session-started", () => {
@@ -513,17 +622,23 @@ export function useSystemAudio() {
       };
 
       if (mode === "realtime") {
-        const apiKey = getSttApiKey(selectedSttProvider.variables);
-        args.realtimeConfig = {
-          api_key: apiKey,
-          model: config.realtime_model || "gpt-realtime-whisper",
-          language: config.realtime_language || "en",
-        };
+        const providerConfigs = buildRealtimeProviderConfigs(
+          config,
+          selectedSttProvider.provider,
+          selectedSttProvider.variables,
+          allSttProviders
+        );
+        Object.assign(args, providerConfigs);
       }
 
       return { args, deviceId, mode };
     },
-    [selectedAudioDevices.output.id, selectedSttProvider.variables]
+    [
+      selectedAudioDevices.output.id,
+      selectedSttProvider.provider,
+      selectedSttProvider.variables,
+      allSttProviders,
+    ]
   );
 
   // Context management functions
@@ -656,8 +771,21 @@ export function useSystemAudio() {
 
   const startRealtimeCapture = useCallback(async () => {
     setError("");
-    const apiKey = getSttApiKey(selectedSttProvider.variables);
-    if (!apiKey) {
+    const providerConfigs = buildRealtimeProviderConfigs(
+      vadConfig,
+      selectedSttProvider.provider,
+      selectedSttProvider.variables,
+      allSttProviders
+    );
+
+    if (vadConfig.realtime_speaker_labels) {
+      if (!providerConfigs.assemblyaiConfig?.apiKey) {
+        setError(
+          "AssemblyAI API key required. Add it below or configure an AssemblyAI STT provider in Dev Space."
+        );
+        throw new Error("AssemblyAI API key required");
+      }
+    } else if (!providerConfigs.realtimeConfig?.apiKey) {
       setError(
         "OpenAI API key required. Configure it in Dev Space → STT provider."
       );
@@ -681,16 +809,14 @@ export function useSystemAudio() {
     await invoke<string>("start_system_audio_capture", {
       vadConfig,
       deviceId,
-      realtimeConfig: {
-        api_key: apiKey,
-        model: vadConfig.realtime_model || "gpt-realtime-whisper",
-        language: vadConfig.realtime_language || "en",
-      },
+      ...providerConfigs,
     });
   }, [
     vadConfig,
     selectedAudioDevices.output.id,
+    selectedSttProvider.provider,
     selectedSttProvider.variables,
+    allSttProviders,
     clearRealtimePending,
   ]);
 
@@ -1128,6 +1254,18 @@ export function useSystemAudio() {
 
     if (prevMode !== mode) {
       restartCaptureForMode(vadConfig);
+      return;
+    }
+
+    const speakerLabelsChanged =
+      realtimeSpeakerLabelsRef.current !==
+      Boolean(vadConfig.realtime_speaker_labels);
+    realtimeSpeakerLabelsRef.current = Boolean(
+      vadConfig.realtime_speaker_labels
+    );
+
+    if (mode === "realtime" && speakerLabelsChanged) {
+      restartCaptureForMode(vadConfig);
     }
   }, [vadConfig, capturing, restartCaptureForMode]);
 
@@ -1269,6 +1407,7 @@ export function useSystemAudio() {
     isRealtimeSessionActive,
     realtimeSegments,
     realtimePendingDelta,
+    realtimePendingSpeakerLabel,
     // Scroll area ref for keyboard navigation
     scrollAreaRef,
   };

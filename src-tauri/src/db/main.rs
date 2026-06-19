@@ -23,5 +23,11 @@ pub fn migrations() -> Vec<Migration> {
             sql: include_str!("migrations/realtime-transcripts.sql"),
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 4,
+            description: "add_realtime_speaker_label",
+            sql: include_str!("migrations/realtime-speaker-label.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }

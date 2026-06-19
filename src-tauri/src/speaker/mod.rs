@@ -18,6 +18,7 @@ mod linux;
 #[cfg(target_os = "linux")]
 use linux::{SpeakerInput as PlatformSpeakerInput, SpeakerStream as PlatformSpeakerStream};
 
+mod assemblyai;
 mod commands;
 mod realtime;
 

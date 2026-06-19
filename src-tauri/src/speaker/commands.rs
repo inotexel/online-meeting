@@ -1,5 +1,5 @@
 // Pluely AI Speech Detection, and capture system audio (speaker output) as a stream of f32 samples.
-use crate::speaker::{realtime::RealtimeConfig, AudioDevice, SpeakerInput};
+use crate::speaker::{assemblyai::AssemblyAiConfig, realtime::RealtimeConfig, AudioDevice, SpeakerInput};
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use futures_util::StreamExt;
@@ -32,6 +32,14 @@ pub struct VadConfig {
     pub realtime_model: Option<String>,
     #[serde(default)]
     pub realtime_language: Option<String>,
+    #[serde(default)]
+    pub realtime_speaker_labels: Option<bool>,
+    #[serde(default)]
+    pub realtime_max_speakers: Option<u32>,
+    #[serde(default)]
+    pub realtime_assemblyai_model: Option<String>,
+    #[serde(default)]
+    pub assemblyai_api_key: Option<String>,
 }
 
 impl Default for VadConfig {
@@ -49,6 +57,10 @@ impl Default for VadConfig {
             max_recording_duration_secs: 180, // 3 minutes default
             realtime_model: Some("gpt-realtime-whisper".to_string()),
             realtime_language: Some("en".to_string()),
+            realtime_speaker_labels: Some(false),
+            realtime_max_speakers: Some(5),
+            realtime_assemblyai_model: Some("universal-streaming-english".to_string()),
+            assemblyai_api_key: None,
         }
     }
 }
@@ -71,6 +83,7 @@ pub async fn start_system_audio_capture(
     vad_config: Option<VadConfig>,
     device_id: Option<String>,
     realtime_config: Option<RealtimeConfig>,
+    assemblyai_config: Option<AssemblyAiConfig>,
 ) -> Result<(), String> {
     let state = app.state::<crate::AudioState>();
 
@@ -134,32 +147,65 @@ pub async fn start_system_audio_capture(
     let task = tokio::spawn(async move {
         match capture_mode.as_str() {
             "realtime" => {
-                let realtime_cfg = match realtime_config {
-                    Some(cfg) if !cfg.api_key.is_empty() => cfg,
-                    _ => {
-                        let _ = app_clone.emit(
-                            "realtime-transcription-error",
-                            "OpenAI API key is required for realtime transcription",
-                        );
-                        let state = app_clone.state::<crate::AudioState>();
-                        if let Ok(mut guard) = state.stream_task.lock() {
-                            *guard = None;
+                let use_speaker_labels = vad_config
+                    .realtime_speaker_labels
+                    .unwrap_or(false);
+
+                if use_speaker_labels {
+                    let assembly_cfg = match assemblyai_config {
+                        Some(cfg) if !cfg.api_key.is_empty() => cfg,
+                        _ => {
+                            let _ = app_clone.emit(
+                                "realtime-transcription-error",
+                                "AssemblyAI API key is required for speaker identification",
+                            );
+                            let state = app_clone.state::<crate::AudioState>();
+                            if let Ok(mut guard) = state.stream_task.lock() {
+                                *guard = None;
+                            }
+                            *state
+                                .is_capturing
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+                            let _ = app_clone.emit("capture-stopped", ());
+                            return;
                         }
-                        *state
-                            .is_capturing
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
-                        let _ = app_clone.emit("capture-stopped", ());
-                        return;
-                    }
-                };
-                crate::speaker::realtime::run_realtime_capture(
-                    app_clone.clone(),
-                    stream,
-                    sr,
-                    realtime_cfg,
-                )
-                .await;
+                    };
+                    crate::speaker::assemblyai::run_assemblyai_capture(
+                        app_clone.clone(),
+                        stream,
+                        sr,
+                        assembly_cfg,
+                    )
+                    .await;
+                } else {
+                    let realtime_cfg = match realtime_config {
+                        Some(cfg) if !cfg.api_key.is_empty() => cfg,
+                        _ => {
+                            let _ = app_clone.emit(
+                                "realtime-transcription-error",
+                                "OpenAI API key is required for realtime transcription",
+                            );
+                            let state = app_clone.state::<crate::AudioState>();
+                            if let Ok(mut guard) = state.stream_task.lock() {
+                                *guard = None;
+                            }
+                            *state
+                                .is_capturing
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+                            let _ = app_clone.emit("capture-stopped", ());
+                            return;
+                        }
+                    };
+                    crate::speaker::realtime::run_realtime_capture(
+                        app_clone.clone(),
+                        stream,
+                        sr,
+                        realtime_cfg,
+                    )
+                    .await;
+                }
             }
             "continuous" => {
                 run_continuous_capture(app_clone.clone(), stream, sr, vad_config).await;

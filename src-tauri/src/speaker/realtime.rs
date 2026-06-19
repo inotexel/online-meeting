@@ -96,10 +96,27 @@ async fn flush_float_buffer(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RealtimeConfig {
+    #[serde(default = "default_openai_provider")]
+    pub provider: String,
     pub api_key: String,
+    #[serde(default = "default_openai_model")]
     pub model: String,
+    #[serde(default = "default_openai_language")]
     pub language: String,
+}
+
+fn default_openai_provider() -> String {
+    "openai".to_string()
+}
+
+fn default_openai_model() -> String {
+    "gpt-realtime-whisper".to_string()
+}
+
+fn default_openai_language() -> String {
+    "en".to_string()
 }
 
 #[derive(Debug, Clone, Serialize)]

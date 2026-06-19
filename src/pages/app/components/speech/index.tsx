@@ -68,6 +68,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
     isRealtimeSessionActive,
     realtimeSegments,
     realtimePendingDelta,
+    realtimePendingSpeakerLabel,
   } = props;
 
   const { hasActiveLicense, supportsImages } = useApp();
@@ -394,8 +395,18 @@ export const SystemAudio = (props: useSystemAudioType) => {
                         <LiveTranscript
                           segments={realtimeSegments}
                           pendingDelta={realtimePendingDelta}
+                          pendingSpeakerLabel={realtimePendingSpeakerLabel}
                           isSessionActive={isRealtimeSessionActive}
                           isCapturing={capturing}
+                          showSpeakerLabels={Boolean(vadConfig.realtime_speaker_labels)}
+                          speakerLabelsEnabled={Boolean(vadConfig.realtime_speaker_labels)}
+                          onSpeakerLabelsChange={(enabled) =>
+                            updateVadConfiguration({
+                              ...vadConfig,
+                              realtime_speaker_labels: enabled,
+                            })
+                          }
+                          speakerToggleDisabled={isRealtimeSessionActive}
                         />
                       </div>
                     )}
