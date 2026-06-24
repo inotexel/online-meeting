@@ -25,6 +25,8 @@ import {
 } from "@/lib/database";
 import { Message } from "@/types/completion";
 import { TYPE_PROVIDER } from "@/types/provider.type";
+import { useMeetingMemory } from "./useMeetingMemory";
+import { formatDialogueLine } from "@/lib/memory/dialogue";
 
 export type CaptureMode = "vad" | "continuous" | "realtime";
 
@@ -157,7 +159,8 @@ export interface ChatConversation {
 export type useSystemAudioType = ReturnType<typeof useSystemAudio>;
 
 export function useSystemAudio() {
-  const { resizeWindow } = useWindowResize();
+  const { resizeWindow, overlaySizeMode, applyOverlaySizeMode } =
+    useWindowResize();
   const globalShortcuts = useGlobalShortcuts();
   const [isPopoverOpen, setIsPopoverOpen] = useState(false);
   const [capturing, setCapturing] = useState(false);
@@ -196,6 +199,13 @@ export function useSystemAudio() {
     DEFAULT_VAD_CONFIG.realtime_speaker_labels ?? false
   );
   const isRestartingCaptureRef = useRef(false);
+  const isStoppingCaptureRef = useRef(false);
+  const lastRealtimeActivityRef = useRef(Date.now());
+  const capturingRef = useRef(false);
+
+  const touchRealtimeActivity = useCallback(() => {
+    lastRealtimeActivityRef.current = Date.now();
+  }, []);
 
   const [conversation, setConversation] = useState<ChatConversation>({
     id: "",
@@ -217,10 +227,44 @@ export function useSystemAudio() {
     systemPrompt,
     selectedAudioDevices,
   } = useApp();
+
+  const aiProvider = allAiProviders.find(
+    (p) => p.id === selectedAIProvider.provider
+  );
+  const meetingMemory = useMeetingMemory({
+    provider: aiProvider,
+    selectedProvider: selectedAIProvider,
+    openaiApiKey: getSttApiKey(selectedSttProvider.variables),
+  });
+
   const abortControllerRef = useRef<AbortController | null>(null);
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isSavingRef = useRef<boolean>(false);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
+  const SCROLL_BOTTOM_THRESHOLD_PX = 72;
+
+  const getOverlayScrollViewport = useCallback(() => {
+    return scrollAreaRef.current?.querySelector(
+      "[data-slot='scroll-area-viewport']"
+    ) as HTMLElement | null;
+  }, []);
+
+  const isOverlayNearBottom = useCallback((element: HTMLElement) => {
+    const distance =
+      element.scrollHeight - element.scrollTop - element.clientHeight;
+    return distance <= SCROLL_BOTTOM_THRESHOLD_PX;
+  }, []);
+
+  const scrollOverlayToBottom = useCallback(
+    (behavior: ScrollBehavior = "auto") => {
+      if (!stickToBottomRef.current) return;
+      const scrollElement = getOverlayScrollViewport();
+      if (!scrollElement) return;
+      scrollElement.scrollTo({ top: scrollElement.scrollHeight, behavior });
+    },
+    [getOverlayScrollViewport]
+  );
 
   // Load context settings and VAD config from localStorage on mount
   useEffect(() => {
@@ -330,13 +374,8 @@ export function useSystemAudio() {
 
   const syncRealtimePendingDelta = useCallback(() => {
     const entries = Object.values(realtimePendingByItemRef.current);
-    const pending = entries
-      .map((entry) => entry.text)
-      .filter(Boolean)
-      .join(" ")
-      .trim();
     const latestEntry = [...entries].reverse().find((entry) => entry.text.trim());
-    setRealtimePendingDelta(pending);
+    setRealtimePendingDelta(latestEntry?.text.trim() ?? "");
     setRealtimePendingSpeakerLabel(latestEntry?.speakerLabel ?? null);
   }, []);
 
@@ -374,7 +413,11 @@ export function useSystemAudio() {
           };
           if (!payload.delta) return;
 
-          const itemKey = payload.itemId ?? "default";
+          touchRealtimeActivity();
+
+          const itemKey =
+            payload.itemId ??
+            `${payload.speakerLabel ?? "unknown"}_default`;
           const current = realtimePendingByItemRef.current[itemKey] ?? {
             text: "",
           };
@@ -396,12 +439,16 @@ export function useSystemAudio() {
           const text = payload.transcript?.trim();
           if (!text) return;
 
+          touchRealtimeActivity();
+
           if (payload.itemId) {
             if (realtimeFinalItemIdsRef.current.has(payload.itemId)) return;
             realtimeFinalItemIdsRef.current.add(payload.itemId);
           }
 
-          const itemKey = payload.itemId ?? "default";
+          const itemKey =
+            payload.itemId ??
+            `${payload.speakerLabel ?? "unknown"}_default`;
           delete realtimePendingByItemRef.current[itemKey];
           syncRealtimePendingDelta();
 
@@ -443,6 +490,13 @@ export function useSystemAudio() {
               console.error("Failed to save realtime segment:", err);
             }
           }
+
+          void meetingMemory.appendUtterance({
+            utteranceId: payload.itemId ?? segmentId,
+            text,
+            speakerLabel: payload.speakerLabel ?? null,
+            sequenceNum,
+          });
         });
 
         await registerListener("transcript-speaker-revision", (event) => {
@@ -469,7 +523,19 @@ export function useSystemAudio() {
 
         await registerListener("realtime-session-started", () => {
           realtimeFinalItemIdsRef.current.clear();
+          touchRealtimeActivity();
           setIsRealtimeSessionActive(true);
+          setError((prev) =>
+            prev?.includes("Reconnecting") ? "" : prev
+          );
+        });
+
+        await registerListener("realtime-session-reconnecting", () => {
+          setIsRealtimeSessionActive(false);
+          clearRealtimePending();
+          setError(
+            "Reconnecting to transcription service…"
+          );
         });
 
         await registerListener("realtime-session-stopped", async () => {
@@ -488,6 +554,7 @@ export function useSystemAudio() {
           const message = event.payload as string;
           setError(message || "Realtime transcription error");
           setIsRealtimeSessionActive(false);
+          setCapturing(false);
         });
       } catch (err) {
         console.error("Failed to setup realtime listeners:", err);
@@ -500,7 +567,52 @@ export function useSystemAudio() {
       cancelled = true;
       unlisteners.forEach((unlisten) => unlisten());
     };
-  }, [syncRealtimePendingDelta]);
+  }, [
+    syncRealtimePendingDelta,
+    meetingMemory.appendUtterance,
+    touchRealtimeActivity,
+    clearRealtimePending,
+  ]);
+
+  // Keep UI in sync when Rust ends capture (WS drop, audio error, etc.)
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    const setup = async () => {
+      unlisten = await listen("capture-stopped", () => {
+        if (!capturingRef.current) return;
+        if (isRestartingCaptureRef.current) return;
+
+        const mode = captureModeRef.current;
+        setCapturing(false);
+        setIsRealtimeSessionActive(false);
+        setIsRecordingInContinuousMode(false);
+
+        if (mode === "realtime") {
+          clearRealtimePending();
+          if (!isStoppingCaptureRef.current && realtimeSessionIdRef.current) {
+            setError(
+              (prev) =>
+                prev ||
+                "Realtime capture ended unexpectedly. Press Start to try again."
+            );
+            void meetingMemory.endGraphMeeting();
+          }
+        }
+
+        isStoppingCaptureRef.current = false;
+      });
+    };
+
+    void setup();
+    return () => {
+      unlisten?.();
+    };
+  }, [clearRealtimePending, meetingMemory.endGraphMeeting]);
+
+  useEffect(() => {
+    capturingRef.current = capturing;
+  }, [capturing]);
 
   // Handle single speech detection event (VAD and continuous modes only)
   useEffect(() => {
@@ -615,10 +727,16 @@ export function useSystemAudio() {
           ? selectedAudioDevices.output.id
           : null;
 
+      const inputDeviceId =
+        selectedAudioDevices.input.id !== "default"
+          ? selectedAudioDevices.input.id
+          : null;
+
       const mode = getCaptureMode(config);
       const args: Record<string, unknown> = {
         vadConfig: config,
         deviceId,
+        inputDeviceId,
       };
 
       if (mode === "realtime") {
@@ -635,6 +753,7 @@ export function useSystemAudio() {
     },
     [
       selectedAudioDevices.output.id,
+      selectedAudioDevices.input.id,
       selectedSttProvider.provider,
       selectedSttProvider.variables,
       allSttProviders,
@@ -796,6 +915,7 @@ export function useSystemAudio() {
     realtimeSessionIdRef.current = sessionId;
     realtimeSequenceRef.current = 0;
     realtimeFinalItemIdsRef.current.clear();
+    lastRealtimeActivityRef.current = Date.now();
     setRealtimeSegments([]);
     clearRealtimePending();
 
@@ -804,20 +924,40 @@ export function useSystemAudio() {
         ? selectedAudioDevices.output.id
         : null;
 
+    const inputDeviceId =
+      selectedAudioDevices.input.id !== "default"
+        ? selectedAudioDevices.input.id
+        : null;
+
     await createRealtimeSession(sessionId, deviceId);
+    await meetingMemory.refreshKnowledgeConfigured();
+    await meetingMemory.startGraphMeeting(sessionId);
+
+    // Clear any orphaned capture task from a prior failed session
+    isRestartingCaptureRef.current = true;
+    try {
+      await invoke("stop_system_audio_capture");
+    } catch {
+      // No active capture — expected on first start
+    } finally {
+      isRestartingCaptureRef.current = false;
+    }
 
     await invoke<string>("start_system_audio_capture", {
       vadConfig,
       deviceId,
+      inputDeviceId,
       ...providerConfigs,
     });
   }, [
     vadConfig,
     selectedAudioDevices.output.id,
+    selectedAudioDevices.input.id,
     selectedSttProvider.provider,
     selectedSttProvider.variables,
     allSttProviders,
     clearRealtimePending,
+    meetingMemory,
   ]);
 
   const restartCaptureForMode = useCallback(
@@ -998,6 +1138,9 @@ export function useSystemAudio() {
 
       setCapturing(true);
       setIsPopoverOpen(true);
+      void resizeWindow(true, {
+        originalHeight: isRealtime ? 680 : 600,
+      });
       setIsContinuousMode(isContinuous);
       setIsRealtimeMode(isRealtime);
       setRecordingProgress(0);
@@ -1037,10 +1180,13 @@ export function useSystemAudio() {
     selectedSttProvider.variables,
     buildCaptureInvokeArgs,
     startRealtimeCapture,
+    resizeWindow,
   ]);
 
   const stopCapture = useCallback(async () => {
     try {
+      isStoppingCaptureRef.current = true;
+
       // Abort any ongoing AI requests
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
@@ -1049,6 +1195,8 @@ export function useSystemAudio() {
 
       // Stop the audio capture
       await invoke<string>("stop_system_audio_capture");
+
+      await meetingMemory.endGraphMeeting();
 
       // Reset ALL states
       setCapturing(false);
@@ -1067,12 +1215,86 @@ export function useSystemAudio() {
       setLastAIResponse("");
       setError("");
       setIsPopoverOpen(false);
+      isStoppingCaptureRef.current = false;
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       setError(`Failed to stop capture: ${errorMessage}`);
       console.error("Stop capture error:", err);
+      isStoppingCaptureRef.current = false;
     }
-  }, [clearRealtimePending]);
+  }, [clearRealtimePending, meetingMemory]);
+
+  // Detect stalled transcription while UI still shows Stop
+  useEffect(() => {
+    if (!capturing || !isRealtimeMode || !isRealtimeSessionActive) return;
+
+    const interval = window.setInterval(() => {
+      const idleMs = Date.now() - lastRealtimeActivityRef.current;
+      if (idleMs < 45_000) return;
+
+      void invoke<boolean>("get_capture_status")
+        .then((stillCapturing) => {
+          if (!stillCapturing) {
+            setCapturing(false);
+            setIsRealtimeSessionActive(false);
+            setError(
+              (prev) =>
+                prev ||
+                "Transcription stopped but capture was still active. Press Start again."
+            );
+            return;
+          }
+
+          setError(
+            "No new transcription for 45s while audio is still playing. Try Stop → Start, or check system audio output."
+          );
+        })
+        .catch(() => {
+          // ignore status check failures
+        });
+    }, 10_000);
+
+    return () => window.clearInterval(interval);
+  }, [capturing, isRealtimeMode, isRealtimeSessionActive]);
+
+  // Keep live transcript snapshot in sync for the coach
+  useEffect(() => {
+    if (!isRealtimeSessionActive || !capturing) return;
+
+    const parts = realtimeSegments.map((segment) =>
+      formatDialogueLine(segment.speakerLabel, segment.text)
+    );
+    const pending = realtimePendingDelta.trim();
+    const pendingLine = realtimePendingSpeakerLabel
+      ? formatDialogueLine(realtimePendingSpeakerLabel, pending)
+      : pending;
+    meetingMemory.setLiveTranscriptSnapshot(
+      [...parts, pendingLine].filter(Boolean).join("\n")
+    );
+  }, [
+    isRealtimeSessionActive,
+    capturing,
+    realtimeSegments,
+    realtimePendingDelta,
+    realtimePendingSpeakerLabel,
+    meetingMemory.setLiveTranscriptSnapshot,
+  ]);
+
+  // Periodic memory sync + live coaching during realtime capture
+  const runCoachCycleRef = useRef(meetingMemory.runCoachCycle);
+  runCoachCycleRef.current = meetingMemory.runCoachCycle;
+
+  useEffect(() => {
+    if (!isRealtimeSessionActive || !capturing) return;
+
+    void runCoachCycleRef.current(true);
+
+    const interval = window.setInterval(() => {
+      void runCoachCycleRef.current();
+    }, 15_000);
+
+    return () => window.clearInterval(interval);
+  }, [isRealtimeSessionActive, capturing]);
 
   // Manual stop for continuous recording
   const manualStopAndSend = useCallback(async () => {
@@ -1121,6 +1343,14 @@ export function useSystemAudio() {
   }, [startCapture]);
 
   useEffect(() => {
+    if (capturing) {
+      document.body.dataset.pluelyCapturing = "true";
+    } else {
+      delete document.body.dataset.pluelyCapturing;
+    }
+  }, [capturing]);
+
+  useEffect(() => {
     const shouldAutoOpen =
       capturing ||
       setupRequired ||
@@ -1129,10 +1359,12 @@ export function useSystemAudio() {
       !!error;
     if (shouldAutoOpen) {
       setIsPopoverOpen(true);
-      resizeWindow(true);
+      const expandedHeight = isRealtimeMode && capturing ? 680 : 600;
+      void resizeWindow(true, { originalHeight: expandedHeight });
     }
   }, [
     capturing,
+    isRealtimeMode,
     setupRequired,
     isAIProcessing,
     lastAIResponse,
@@ -1240,6 +1472,7 @@ export function useSystemAudio() {
     captureModeRef.current = mode;
 
     if (!capturing) {
+      captureModeRef.current = mode;
       setIsContinuousMode(mode === "continuous");
       setIsRealtimeMode(mode === "realtime");
       return;
@@ -1269,27 +1502,58 @@ export function useSystemAudio() {
     }
   }, [vadConfig, capturing, restartCaptureForMode]);
 
-  const scrollRealtimeIntoView = useCallback(() => {
-    const scrollElement = scrollAreaRef.current?.querySelector(
-      "[data-slot='scroll-area-viewport']"
-    ) as HTMLElement | null;
-    if (!scrollElement) return;
-    scrollElement.scrollTop = scrollElement.scrollHeight;
-  }, []);
+  // Track manual scroll — only auto-scroll when user is already at the bottom
+  useEffect(() => {
+    if (!isPopoverOpen) return;
+
+    let viewport: HTMLElement | null = null;
+    const onScroll = () => {
+      if (!viewport) return;
+      stickToBottomRef.current = isOverlayNearBottom(viewport);
+    };
+
+    const attach = () => {
+      viewport = getOverlayScrollViewport();
+      if (!viewport) return false;
+      viewport.addEventListener("scroll", onScroll, { passive: true });
+      return true;
+    };
+
+    if (!attach()) {
+      const frame = requestAnimationFrame(() => attach());
+      return () => {
+        cancelAnimationFrame(frame);
+        viewport?.removeEventListener("scroll", onScroll);
+      };
+    }
+
+    return () => viewport?.removeEventListener("scroll", onScroll);
+  }, [isPopoverOpen, getOverlayScrollViewport, isOverlayNearBottom]);
 
   useEffect(() => {
-    if (!isRealtimeMode) return;
-    scrollRealtimeIntoView();
-  }, [isRealtimeMode, realtimeSegments, realtimePendingDelta, scrollRealtimeIntoView]);
+    if (isPopoverOpen) {
+      stickToBottomRef.current = true;
+    }
+  }, [isPopoverOpen]);
+
+  useEffect(() => {
+    scrollOverlayToBottom();
+  }, [
+    realtimeSegments,
+    realtimePendingDelta,
+    lastTranscription,
+    lastAIResponse,
+    conversation.messages.length,
+    isAIProcessing,
+    scrollOverlayToBottom,
+  ]);
 
   // Keyboard arrow key support for scrolling (local shortcut)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!isPopoverOpen) return;
 
-      const scrollElement = scrollAreaRef.current?.querySelector(
-        "[data-slot='scroll-area-viewport']"
-      ) as HTMLElement;
+      const scrollElement = getOverlayScrollViewport();
 
       if (!scrollElement) return;
 
@@ -1298,15 +1562,21 @@ export function useSystemAudio() {
       if (e.key === "ArrowDown") {
         e.preventDefault();
         scrollElement.scrollBy({ top: scrollAmount, behavior: "smooth" });
+        requestAnimationFrame(() => {
+          if (isOverlayNearBottom(scrollElement)) {
+            stickToBottomRef.current = true;
+          }
+        });
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
         scrollElement.scrollBy({ top: -scrollAmount, behavior: "smooth" });
+        stickToBottomRef.current = false;
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isPopoverOpen]);
+  }, [isPopoverOpen, getOverlayScrollViewport, isOverlayNearBottom]);
 
   // Keyboard shortcuts for continuous mode recording (local shortcuts)
   useEffect(() => {
@@ -1384,6 +1654,8 @@ export function useSystemAudio() {
     startNewConversation,
     // Window resize
     resizeWindow,
+    overlaySizeMode,
+    applyOverlaySizeMode,
     quickActions,
     addQuickAction,
     removeQuickAction,
@@ -1408,6 +1680,21 @@ export function useSystemAudio() {
     realtimeSegments,
     realtimePendingDelta,
     realtimePendingSpeakerLabel,
+    // Meeting memory + coach
+    meetingClientName: meetingMemory.clientName,
+    setMeetingClientName: meetingMemory.setClientName,
+    meetingClientId: meetingMemory.clientId,
+    openaiApiKey: getSttApiKey(selectedSttProvider.variables),
+    knowledgeConfigured: meetingMemory.knowledgeConfigured,
+    knowledgeStatus: meetingMemory.knowledgeStatus,
+    clientGraphContext: meetingMemory.clientContext,
+    coachSuggestions: meetingMemory.coachSuggestions,
+    isMemorySyncing: meetingMemory.isMemorySyncing,
+    coachStatus: meetingMemory.coachStatus,
+    coachLastError: meetingMemory.coachLastError,
+    coachBlockedReason: meetingMemory.coachBlockedReason,
+    testKnowledgeConnection: meetingMemory.testConnection,
+    refreshClientGraphContext: meetingMemory.refreshClientContext,
     // Scroll area ref for keyboard navigation
     scrollAreaRef,
   };

@@ -27,6 +27,9 @@ import {
 } from "@/lib/platform-instructions";
 import { cn } from "@/lib/utils";
 
+/** Re-enable when AssemblyAI speaker diarization settings should appear. */
+const SHOW_SPEAKER_IDENTIFICATION = false;
+
 // Sensitivity presets for simpler UX
 const SENSITIVITY_PRESETS = {
   low: {
@@ -235,27 +238,29 @@ export const SettingsPanel = ({
             {/* Realtime transcription settings */}
             {isRealtimeMode && (
               <div className="space-y-3">
-                <div className="flex items-center justify-between gap-4">
-                  <div className="flex-1">
-                    <Label className="text-xs font-medium">
-                      Speaker identification
-                    </Label>
-                    <p className="text-[10px] text-muted-foreground mt-0.5">
-                      Label who is speaking using AssemblyAI realtime diarization.
-                    </p>
+                {SHOW_SPEAKER_IDENTIFICATION && (
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex-1">
+                      <Label className="text-xs font-medium">
+                        Speaker identification
+                      </Label>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">
+                        Label who is speaking using AssemblyAI realtime diarization.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={Boolean(vadConfig.realtime_speaker_labels)}
+                      onCheckedChange={(checked) =>
+                        onUpdateVadConfig({
+                          ...vadConfig,
+                          realtime_speaker_labels: checked,
+                        })
+                      }
+                    />
                   </div>
-                  <Switch
-                    checked={Boolean(vadConfig.realtime_speaker_labels)}
-                    onCheckedChange={(checked) =>
-                      onUpdateVadConfig({
-                        ...vadConfig,
-                        realtime_speaker_labels: checked,
-                      })
-                    }
-                  />
-                </div>
+                )}
 
-                {vadConfig.realtime_speaker_labels ? (
+                {SHOW_SPEAKER_IDENTIFICATION && vadConfig.realtime_speaker_labels ? (
                   <>
                     <div className="space-y-2">
                       <Label className="text-xs font-medium">

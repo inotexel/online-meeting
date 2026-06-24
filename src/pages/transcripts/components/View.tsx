@@ -97,6 +97,7 @@ const ViewTranscript = () => {
             isSessionActive={false}
             showSpeakerLabels={showSpeakerLabels}
             readOnly
+            displayMode="scroll"
             title="Session transcript"
             maxHeightClass="max-h-none"
             emptyMessage="No transcript lines saved for this session."

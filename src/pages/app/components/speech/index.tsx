@@ -24,7 +24,12 @@ import { PermissionFlow } from "./PermissionFlow";
 import { QuickActions } from "./QuickActions";
 import { Warning } from "./Warning";
 import { LiveTranscript } from "./LiveTranscript";
-import { useSystemAudioType, getCaptureMode } from "@/hooks";
+import { ClientContextBar } from "./ClientContextBar";
+import { UpcomingCalendarMeetings } from "./UpcomingCalendarMeetings";
+import { ClientDocuments } from "./ClientDocuments";
+import { CoachPanel } from "./CoachPanel";
+import { OverlaySizeToggle } from "./OverlaySizeToggle";
+import { useSystemAudioType, getCaptureMode, useGoogleCalendar } from "@/hooks";
 import { useApp } from "@/contexts";
 import { cn } from "@/lib/utils";
 
@@ -48,6 +53,8 @@ export const SystemAudio = (props: useSystemAudioType) => {
     startNewConversation,
     conversation,
     resizeWindow,
+    overlaySizeMode,
+    applyOverlaySizeMode,
     quickActions,
     addQuickAction,
     removeQuickAction,
@@ -69,6 +76,18 @@ export const SystemAudio = (props: useSystemAudioType) => {
     realtimeSegments,
     realtimePendingDelta,
     realtimePendingSpeakerLabel,
+    meetingClientName,
+    setMeetingClientName,
+    openaiApiKey,
+    knowledgeConfigured,
+    knowledgeStatus,
+    clientGraphContext,
+    coachSuggestions,
+    isMemorySyncing,
+    coachStatus,
+    coachLastError,
+    coachBlockedReason,
+    testKnowledgeConnection,
   } = props;
 
   const { hasActiveLicense, supportsImages } = useApp();
@@ -83,6 +102,10 @@ export const SystemAudio = (props: useSystemAudioType) => {
   const captureMode = getCaptureMode(vadConfig);
   const isVadMode = captureMode === "vad";
   const hasResponse = !isRealtimeMode && (lastAIResponse || isAIProcessing);
+
+  const googleCalendar = useGoogleCalendar(
+    captureMode === "realtime" && knowledgeConfigured
+  );
 
   // Keyboard shortcut for Cmd+K to toggle view mode
   useEffect(() => {
@@ -186,6 +209,9 @@ export const SystemAudio = (props: useSystemAudioType) => {
     return "Open system audio panel";
   };
 
+  const expandedOriginalHeight =
+    captureMode === "realtime" && capturing ? 680 : 600;
+
   return (
     <Popover
       open={isPopoverOpen}
@@ -194,7 +220,9 @@ export const SystemAudio = (props: useSystemAudioType) => {
           return;
         }
         setIsPopoverOpen(open);
-        resizeWindow(open);
+        void resizeWindow(open, {
+          originalHeight: expandedOriginalHeight,
+        });
       }}
     >
       <PopoverTrigger asChild>
@@ -217,7 +245,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
         className="select-none w-screen p-0 border shadow-lg overflow-hidden border-input/50"
         sideOffset={8}
       >
-          <div className="flex flex-col h-[calc(100vh-4rem)] overflow-hidden">
+          <div className="flex flex-col h-[calc(100vh-3.5rem)] min-h-[420px] overflow-hidden">
             {/* Header - Mode Switcher + Actions */}
             <div className="flex-shrink-0 p-3 border-b border-border/50">
               <div className="flex items-center justify-between gap-2">
@@ -240,6 +268,13 @@ export const SystemAudio = (props: useSystemAudioType) => {
 
                 {/* Action Buttons */}
                 <div className="flex items-center gap-1.5 flex-shrink-0">
+                  <OverlaySizeToggle
+                    value={overlaySizeMode}
+                    onChange={(mode) =>
+                      void applyOverlaySizeMode(mode, expandedOriginalHeight)
+                    }
+                  />
+
                   {!setupRequired && !capturing && (
                     <Button
                       size="sm"
@@ -389,26 +424,69 @@ export const SystemAudio = (props: useSystemAudioType) => {
                       />
                     )}
 
-                    {/* Live transcript (realtime mode) */}
+                    {/* Live transcript first (realtime mode) */}
                     {captureMode === "realtime" && (
-                      <div className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm pb-2">
-                        <LiveTranscript
-                          segments={realtimeSegments}
-                          pendingDelta={realtimePendingDelta}
-                          pendingSpeakerLabel={realtimePendingSpeakerLabel}
-                          isSessionActive={isRealtimeSessionActive}
-                          isCapturing={capturing}
-                          showSpeakerLabels={Boolean(vadConfig.realtime_speaker_labels)}
-                          speakerLabelsEnabled={Boolean(vadConfig.realtime_speaker_labels)}
-                          onSpeakerLabelsChange={(enabled) =>
-                            updateVadConfiguration({
-                              ...vadConfig,
-                              realtime_speaker_labels: enabled,
-                            })
-                          }
-                          speakerToggleDisabled={isRealtimeSessionActive}
+                      <LiveTranscript
+                        segments={realtimeSegments}
+                        pendingDelta={realtimePendingDelta}
+                        pendingSpeakerLabel={realtimePendingSpeakerLabel}
+                        isSessionActive={isRealtimeSessionActive}
+                        isCapturing={capturing}
+                        showSpeakerLabels={
+                          captureMode === "realtime" &&
+                          !vadConfig.realtime_speaker_labels
+                        }
+                        speakerLabelsEnabled={Boolean(vadConfig.realtime_speaker_labels)}
+                        onSpeakerLabelsChange={(enabled) =>
+                          updateVadConfiguration({
+                            ...vadConfig,
+                            realtime_speaker_labels: enabled,
+                          })
+                        }
+                        speakerToggleDisabled={isRealtimeSessionActive}
+                      />
+                    )}
+
+                    {/* Client memory + coach (realtime mode) */}
+                    {captureMode === "realtime" && (
+                      <>
+                        <UpcomingCalendarMeetings
+                          configured={googleCalendar.configured}
+                          connected={googleCalendar.connected}
+                          meetings={googleCalendar.meetings}
+                          loading={googleCalendar.loading}
+                          connecting={googleCalendar.connecting}
+                          error={googleCalendar.error}
+                          disabled={isRealtimeSessionActive}
+                          selectedClientName={meetingClientName}
+                          onConnect={() => void googleCalendar.connect()}
+                          onDisconnect={() => void googleCalendar.disconnect()}
+                          onRefresh={() => void googleCalendar.refreshMeetings()}
+                          onSelectMeeting={setMeetingClientName}
                         />
-                      </div>
+                        <ClientContextBar
+                          clientName={meetingClientName}
+                          onClientNameChange={setMeetingClientName}
+                          knowledgeConfigured={knowledgeConfigured}
+                          knowledgeStatus={knowledgeStatus}
+                          onTestConnection={testKnowledgeConnection}
+                          meetingCount={clientGraphContext?.meetingCount}
+                          disabled={isRealtimeSessionActive}
+                        />
+                        <ClientDocuments
+                          clientName={meetingClientName}
+                          openaiApiKey={openaiApiKey}
+                          knowledgeConfigured={knowledgeConfigured}
+                          disabled={isRealtimeSessionActive}
+                        />
+                        <CoachPanel
+                          suggestions={coachSuggestions}
+                          isLoading={isMemorySyncing}
+                          blockedReason={coachBlockedReason}
+                          statusMessage={coachStatus}
+                          lastError={coachLastError}
+                        />
+                      </>
                     )}
 
                     {/* AI Response (not shown in realtime mode) */}

@@ -172,6 +172,8 @@ export async function* fetchAIResponse(params: {
   userMessage: string;
   imagesBase64?: string[];
   signal?: AbortSignal;
+  /** When false, skips response-length, language, and markdown UI prompt additions. */
+  enhanceSystemPrompt?: boolean;
 }): AsyncIterable<string> {
   try {
     const {
@@ -182,6 +184,7 @@ export async function* fetchAIResponse(params: {
       userMessage,
       imagesBase64 = [],
       signal,
+      enhanceSystemPrompt = true,
     } = params;
 
     // Check if already aborted
@@ -189,7 +192,9 @@ export async function* fetchAIResponse(params: {
       return;
     }
 
-    const enhancedSystemPrompt = buildEnhancedSystemPrompt(systemPrompt);
+    const enhancedSystemPrompt = enhanceSystemPrompt
+      ? buildEnhancedSystemPrompt(systemPrompt)
+      : systemPrompt || "";
 
     // Check if we should use Pluely API instead
     const usePluelyAPI = await shouldUsePluelyAPI();

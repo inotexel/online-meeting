@@ -1,34 +1,80 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
+import {
+  type OverlaySizeMode,
+  type ResizeWindowOptions,
+  DEFAULT_OVERLAY_SIZE_MODE,
+  loadOverlaySizeMode,
+  resolveResizeOptions,
+  saveOverlaySizeMode,
+} from "@/lib/overlay-size";
 
 // Helper function to check if any popover is open in the DOM
 const isAnyPopoverOpen = (): boolean => {
+  if (document.body.dataset.pluelyCapturing === "true") {
+    return true;
+  }
+  if (
+    document.querySelector('[data-slot="popover-content"][data-state="open"]')
+  ) {
+    return true;
+  }
   const popoverContents = document.querySelectorAll(
     "[data-radix-popper-content-wrapper]"
   );
   return popoverContents.length > 0;
 };
 
+const toLayoutMode = (
+  expanded: boolean,
+  sizeMode: OverlaySizeMode
+): "compact" | "fit" | "original" | "fullscreen" => {
+  if (!expanded) {
+    return "compact";
+  }
+  return sizeMode;
+};
+
 export const useWindowResize = () => {
-  const resizeWindow = useCallback(async (expanded: boolean) => {
-    try {
-      const window = getCurrentWebviewWindow();
+  const [overlaySizeMode, setOverlaySizeModeState] = useState<OverlaySizeMode>(
+    () => loadOverlaySizeMode()
+  );
 
-      if (!expanded && isAnyPopoverOpen()) {
-        return;
-      }
-
-      const newHeight = expanded ? 600 : 54;
-
-      await invoke("set_window_height", {
-        window,
-        height: newHeight,
-      });
-    } catch (error) {
-      console.error("Failed to resize window:", error);
-    }
+  const setOverlaySizeMode = useCallback((mode: OverlaySizeMode) => {
+    setOverlaySizeModeState(mode);
+    saveOverlaySizeMode(mode);
   }, []);
+
+  const resizeWindow = useCallback(
+    async (expanded: boolean, heightOrOptions?: number | ResizeWindowOptions) => {
+      try {
+        if (!expanded && isAnyPopoverOpen()) {
+          return;
+        }
+
+        const options = resolveResizeOptions(heightOrOptions);
+        const sizeMode = options.sizeMode ?? overlaySizeMode;
+        const mode = toLayoutMode(expanded, sizeMode);
+
+        await invoke("set_overlay_layout", {
+          mode,
+          height: options.originalHeight,
+        });
+      } catch (error) {
+        console.error("Failed to resize window:", error);
+      }
+    },
+    [overlaySizeMode]
+  );
+
+  const applyOverlaySizeMode = useCallback(
+    async (mode: OverlaySizeMode, originalHeight?: number) => {
+      setOverlaySizeMode(mode);
+      await resizeWindow(true, { sizeMode: mode, originalHeight });
+    },
+    [resizeWindow, setOverlaySizeMode]
+  );
 
   // Setup drag handling and popover monitoring
   useEffect(() => {
@@ -79,7 +125,13 @@ export const useWindowResize = () => {
     };
   }, [resizeWindow]);
 
-  return { resizeWindow };
+  return {
+    resizeWindow,
+    overlaySizeMode,
+    setOverlaySizeMode,
+    applyOverlaySizeMode,
+    defaultOverlaySizeMode: DEFAULT_OVERLAY_SIZE_MODE,
+  };
 };
 
 interface UseWindowFocusOptions {

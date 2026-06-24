@@ -44,9 +44,44 @@ const App = () => {
         <Card className="w-full flex flex-row items-center gap-2 p-2">
           <SystemAudio {...systemAudio} />
           {systemAudio?.capturing ? (
-            <div className="flex flex-row items-center gap-2 justify-between w-full">
-              <div className="flex flex-1 items-center gap-2">
+            <div className="flex flex-row items-center gap-2 justify-between w-full min-w-0">
+              <div className="flex flex-1 items-center gap-2 min-w-0">
                 <AudioVisualizer isRecording={systemAudio?.capturing} />
+                {systemAudio.isRealtimeMode ? (
+                  <p
+                    className="flex-1 min-w-0 text-[10px] leading-snug text-foreground truncate"
+                    title={
+                      systemAudio.realtimePendingDelta ||
+                      systemAudio.realtimeSegments[
+                        systemAudio.realtimeSegments.length - 1
+                      ]?.text ||
+                      ""
+                    }
+                  >
+                    {systemAudio.realtimePendingDelta ||
+                    systemAudio.realtimeSegments[
+                      systemAudio.realtimeSegments.length - 1
+                    ]?.text ? (
+                      <>
+                        <span className="font-semibold text-primary">
+                          Live:{" "}
+                        </span>
+                        {systemAudio.realtimePendingDelta ||
+                          systemAudio.realtimeSegments[
+                            systemAudio.realtimeSegments.length - 1
+                          ]?.text}
+                      </>
+                    ) : systemAudio.isRealtimeSessionActive ? (
+                      <span className="text-muted-foreground">
+                        Listening for speech…
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground">
+                        Connecting to transcription…
+                      </span>
+                    )}
+                  </p>
+                ) : null}
               </div>
               <div className="flex !w-fit items-center gap-2">
                 <StatusIndicator

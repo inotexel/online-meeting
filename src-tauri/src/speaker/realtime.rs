@@ -124,6 +124,7 @@ fn default_openai_language() -> String {
 struct TranscriptDeltaPayload {
     delta: String,
     item_id: Option<String>,
+    speaker_label: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -131,6 +132,11 @@ struct TranscriptDeltaPayload {
 struct TranscriptFinalPayload {
     transcript: String,
     item_id: Option<String>,
+    speaker_label: String,
+}
+
+fn prefix_item_id(speaker_label: &str, item_id: Option<&str>) -> Option<String> {
+    item_id.map(|id| format!("{}_{}", speaker_label, id))
 }
 
 fn float_to_i16(sample: f32) -> i16 {
@@ -265,7 +271,30 @@ async fn connect_realtime_ws(auth_token: &str) -> Result<
     Ok(ws_stream.split())
 }
 
-fn handle_ws_text_event(app: &AppHandle, text: &str, session_ready: &AtomicBool) {
+fn mark_session_ready(session_ready: &AtomicBool, event_type: &str, event: &serde_json::Value) {
+    if event_type.starts_with("transcription_session.") {
+        session_ready.store(true, Ordering::SeqCst);
+        return;
+    }
+
+    if matches!(event_type, "session.created" | "session.updated") {
+        let session_type = event
+            .get("session")
+            .and_then(|session| session.get("type"))
+            .and_then(|value| value.as_str());
+
+        if session_type == Some("transcription") || event_type == "session.created" {
+            session_ready.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+fn handle_ws_text_event(
+    app: &AppHandle,
+    text: &str,
+    session_ready: &AtomicBool,
+    speaker_label: &str,
+) {
     let Ok(event) = serde_json::from_str::<serde_json::Value>(text) else {
         return;
     };
@@ -275,15 +304,7 @@ fn handle_ws_text_event(app: &AppHandle, text: &str, session_ready: &AtomicBool)
     match event_type {
         "session.created" | "session.updated" | "transcription_session.created"
         | "transcription_session.updated" => {
-            let session_type = event
-                .get("session")
-                .and_then(|session| session.get("type"))
-                .and_then(|value| value.as_str());
-            if session_type == Some("transcription")
-                || event_type.starts_with("transcription_session.")
-            {
-                session_ready.store(true, Ordering::SeqCst);
-            }
+            mark_session_ready(session_ready, event_type, &event);
         }
         "conversation.item.input_audio_transcription.delta" => {
             if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
@@ -292,10 +313,11 @@ fn handle_ws_text_event(app: &AppHandle, text: &str, session_ready: &AtomicBool)
                         "transcript-delta",
                         TranscriptDeltaPayload {
                             delta: delta.to_string(),
-                            item_id: event
-                                .get("item_id")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string()),
+                            item_id: prefix_item_id(
+                                speaker_label,
+                                event.get("item_id").and_then(|v| v.as_str()),
+                            ),
+                            speaker_label: speaker_label.to_string(),
                         },
                     );
                 }
@@ -308,10 +330,11 @@ fn handle_ws_text_event(app: &AppHandle, text: &str, session_ready: &AtomicBool)
                         "transcript-final",
                         TranscriptFinalPayload {
                             transcript: transcript.to_string(),
-                            item_id: event
-                                .get("item_id")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string()),
+                            item_id: prefix_item_id(
+                                speaker_label,
+                                event.get("item_id").and_then(|v| v.as_str()),
+                            ),
+                            speaker_label: speaker_label.to_string(),
                         },
                     );
                 }
@@ -335,134 +358,214 @@ fn handle_ws_text_event(app: &AppHandle, text: &str, session_ready: &AtomicBool)
     }
 }
 
+enum SessionExit {
+    StreamEnded,
+    Disconnected,
+}
+
+async fn run_openai_ws_session(
+    app: &AppHandle,
+    stream: &mut (impl StreamExt<Item = f32> + Unpin),
+    stream_done: &mut bool,
+    sample_rate: u32,
+    config: &RealtimeConfig,
+    speaker_label: &str,
+    emit_session_events: bool,
+) -> Result<SessionExit, String> {
+    let app_ws = app.clone();
+    let client_secret = create_transcription_client_secret(
+        &config.api_key,
+        &config.model,
+        &config.language,
+    )
+    .await?;
+
+    let (mut ws_write, mut ws_read) = connect_realtime_ws(&client_secret).await?;
+    let session_ready = Arc::new(AtomicBool::new(false));
+    let session_ready_timeout = session_ready.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        if !session_ready_timeout.load(Ordering::SeqCst) {
+            warn!("Transcription session ready timeout — starting audio stream");
+            session_ready_timeout.store(true, Ordering::SeqCst);
+        }
+    });
+    let mut session_started = false;
+
+    let mut commit_interval = tokio::time::interval(Duration::from_millis(COMMIT_INTERVAL_MS));
+    commit_interval.tick().await;
+
+    let mut append_interval = tokio::time::interval(Duration::from_millis(APPEND_INTERVAL_MS));
+    append_interval.tick().await;
+
+    let mut float_buffer: Vec<f32> = Vec::new();
+    let mut uncommitted_samples: usize = 0;
+    let source_chunk_size = ((sample_rate as u64) * APPEND_INTERVAL_MS / 1000).max(512) as usize;
+
+    let mut ws_closed = false;
+
+    loop {
+        if session_ready.load(Ordering::SeqCst) && !session_started {
+            session_started = true;
+            if !float_buffer.is_empty() {
+                if flush_float_buffer(
+                    &mut ws_write,
+                    &mut float_buffer,
+                    sample_rate,
+                    &mut uncommitted_samples,
+                )
+                .await
+                .is_err()
+                {
+                    return Ok(SessionExit::Disconnected);
+                }
+            }
+            if emit_session_events {
+                let _ = app_ws.emit("realtime-session-started", ());
+            }
+        }
+
+        let can_stream_audio = session_ready.load(Ordering::SeqCst);
+
+        tokio::select! {
+            sample_opt = stream.next(), if !*stream_done => {
+                match sample_opt {
+                    Some(sample) => {
+                        float_buffer.push(sample);
+                        if can_stream_audio && float_buffer.len() >= source_chunk_size {
+                            let chunk: Vec<f32> = float_buffer.drain(..source_chunk_size).collect();
+                            let pcm = resample_to_pcm16(&chunk, sample_rate);
+                            if send_audio_append(&mut ws_write, &pcm, &mut uncommitted_samples).await.is_err() {
+                                return Ok(SessionExit::Disconnected);
+                            }
+                        }
+                    }
+                    None => {
+                        *stream_done = true;
+                        if can_stream_audio {
+                            let _ = flush_float_buffer(
+                                &mut ws_write,
+                                &mut float_buffer,
+                                sample_rate,
+                                &mut uncommitted_samples,
+                            ).await;
+                        }
+                    }
+                }
+            }
+            _ = append_interval.tick(), if !*stream_done && can_stream_audio => {
+                if float_buffer.len() >= source_chunk_size / 4 {
+                    let take = float_buffer.len().min(source_chunk_size);
+                    let chunk: Vec<f32> = float_buffer.drain(..take).collect();
+                    let pcm = resample_to_pcm16(&chunk, sample_rate);
+                    if send_audio_append(&mut ws_write, &pcm, &mut uncommitted_samples).await.is_err() {
+                        return Ok(SessionExit::Disconnected);
+                    }
+                }
+            }
+            msg = ws_read.next() => {
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        handle_ws_text_event(&app_ws, &text, session_ready.as_ref(), speaker_label);
+                    }
+                    Some(Ok(Message::Close(_))) => {
+                        ws_closed = true;
+                    }
+                    Some(Err(e)) => {
+                        warn!("WebSocket read error: {}", e);
+                        ws_closed = true;
+                    }
+                    None => {
+                        ws_closed = true;
+                    }
+                    _ => {}
+                }
+            }
+            _ = commit_interval.tick(), if can_stream_audio => {
+                if flush_float_buffer(
+                    &mut ws_write,
+                    &mut float_buffer,
+                    sample_rate,
+                    &mut uncommitted_samples,
+                ).await.is_err() {
+                    return Ok(SessionExit::Disconnected);
+                }
+                if let Err(e) = try_commit_audio_buffer(&mut ws_write, &mut uncommitted_samples).await {
+                    warn!("{}", e);
+                }
+            }
+        }
+
+        if *stream_done {
+            break;
+        }
+        if ws_closed {
+            let _ = ws_write.close().await;
+            return Ok(SessionExit::Disconnected);
+        }
+    }
+
+    if session_ready.load(Ordering::SeqCst) {
+        if let Err(e) = try_commit_audio_buffer(&mut ws_write, &mut uncommitted_samples).await {
+            warn!("{}", e);
+        }
+    }
+    let _ = ws_write.close().await;
+
+    Ok(SessionExit::StreamEnded)
+}
+
 pub async fn run_realtime_capture(
     app: AppHandle,
     mut stream: impl StreamExt<Item = f32> + Unpin,
     sample_rate: u32,
     config: RealtimeConfig,
+    speaker_label: &'static str,
+    emit_session_events: bool,
 ) {
-    let app_ws = app.clone();
-    let ws_result: Result<(), String> = async {
-        let client_secret = create_transcription_client_secret(
-            &config.api_key,
-            &config.model,
-            &config.language,
+    let mut stream_done = false;
+    let mut reconnect_attempts = 0u32;
+    const MAX_RECONNECTS: u32 = 12;
+
+    while !stream_done {
+        match run_openai_ws_session(
+            &app,
+            &mut stream,
+            &mut stream_done,
+            sample_rate,
+            &config,
+            speaker_label,
+            emit_session_events,
         )
-        .await?;
-
-        let (mut ws_write, mut ws_read) = connect_realtime_ws(&client_secret).await?;
-        let session_ready = Arc::new(AtomicBool::new(false));
-        let mut session_started = false;
-
-        let mut commit_interval =
-            tokio::time::interval(Duration::from_millis(COMMIT_INTERVAL_MS));
-        commit_interval.tick().await;
-
-        let mut append_interval =
-            tokio::time::interval(Duration::from_millis(APPEND_INTERVAL_MS));
-        append_interval.tick().await;
-
-        let mut float_buffer: Vec<f32> = Vec::new();
-        let mut uncommitted_samples: usize = 0;
-        let source_chunk_size =
-            ((sample_rate as u64) * APPEND_INTERVAL_MS / 1000).max(512) as usize;
-
-        let mut stream_done = false;
-
-        loop {
-            if session_ready.load(Ordering::SeqCst) && !session_started {
-                session_started = true;
-                if !float_buffer.is_empty() {
-                    flush_float_buffer(
-                        &mut ws_write,
-                        &mut float_buffer,
-                        sample_rate,
-                        &mut uncommitted_samples,
-                    )
-                    .await?;
+        .await
+        {
+            Ok(SessionExit::StreamEnded) => break,
+            Ok(SessionExit::Disconnected) => {
+                reconnect_attempts += 1;
+                if reconnect_attempts > MAX_RECONNECTS {
+                    let _ = app.emit(
+                        "realtime-transcription-error",
+                        "Realtime connection lost too many times. Press Stop, then Start again.",
+                    );
+                    break;
                 }
-                let _ = app_ws.emit("realtime-session-started", ());
+                warn!(
+                    "OpenAI realtime disconnected ({}), reconnecting (attempt {})",
+                    speaker_label, reconnect_attempts
+                );
+                if emit_session_events {
+                    let _ = app.emit("realtime-session-reconnecting", ());
+                }
+                tokio::time::sleep(Duration::from_millis(800)).await;
             }
-
-            let can_stream_audio = session_ready.load(Ordering::SeqCst);
-
-            tokio::select! {
-                sample_opt = stream.next(), if !stream_done => {
-                    match sample_opt {
-                        Some(sample) => {
-                            float_buffer.push(sample);
-                            if can_stream_audio && float_buffer.len() >= source_chunk_size {
-                                let chunk: Vec<f32> = float_buffer.drain(..source_chunk_size).collect();
-                                let pcm = resample_to_pcm16(&chunk, sample_rate);
-                                send_audio_append(&mut ws_write, &pcm, &mut uncommitted_samples).await?;
-                            }
-                        }
-                        None => {
-                            stream_done = true;
-                            if can_stream_audio {
-                                flush_float_buffer(
-                                    &mut ws_write,
-                                    &mut float_buffer,
-                                    sample_rate,
-                                    &mut uncommitted_samples,
-                                )
-                                .await?;
-                            }
-                        }
-                    }
-                }
-                _ = append_interval.tick(), if !stream_done && can_stream_audio => {
-                    if float_buffer.len() >= source_chunk_size / 4 {
-                        let take = float_buffer.len().min(source_chunk_size);
-                        let chunk: Vec<f32> = float_buffer.drain(..take).collect();
-                        let pcm = resample_to_pcm16(&chunk, sample_rate);
-                        send_audio_append(&mut ws_write, &pcm, &mut uncommitted_samples).await?;
-                    }
-                }
-                msg = ws_read.next() => {
-                    match msg {
-                        Some(Ok(Message::Text(text))) => {
-                            handle_ws_text_event(&app_ws, &text, session_ready.as_ref());
-                        }
-                        Some(Ok(Message::Close(_))) => break,
-                        Some(Err(e)) => return Err(format!("WebSocket read error: {}", e)),
-                        None => break,
-                        _ => {}
-                    }
-                }
-                _ = commit_interval.tick(), if can_stream_audio => {
-                    flush_float_buffer(
-                        &mut ws_write,
-                        &mut float_buffer,
-                        sample_rate,
-                        &mut uncommitted_samples,
-                    )
-                    .await?;
-                    if let Err(e) = try_commit_audio_buffer(&mut ws_write, &mut uncommitted_samples).await {
-                        warn!("{}", e);
-                    }
-                }
-            }
-
-            if stream_done {
+            Err(err) => {
+                let _ = app.emit("realtime-transcription-error", err);
                 break;
             }
         }
-
-        if session_ready.load(Ordering::SeqCst) {
-            if let Err(e) = try_commit_audio_buffer(&mut ws_write, &mut uncommitted_samples).await {
-                warn!("{}", e);
-            }
-        }
-        let _ = ws_write.close().await;
-
-        Ok(())
-    }
-    .await;
-
-    if let Err(err) = ws_result {
-        let _ = app.emit("realtime-transcription-error", err);
     }
 
-    let _ = app.emit("realtime-session-stopped", ());
+    if emit_session_events {
+        let _ = app.emit("realtime-session-stopped", ());
+    }
 }

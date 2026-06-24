@@ -2,7 +2,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+
+static SHORTCUT_UPDATE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn shortcut_update_lock() -> &'static Mutex<()> {
+    SHORTCUT_UPDATE_LOCK.get_or_init(|| Mutex::new(()))
+}
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use tokio::time::{sleep, Duration};
@@ -326,6 +332,10 @@ pub fn update_shortcuts<R: Runtime>(
     app: AppHandle<R>,
     config: ShortcutsConfig,
 ) -> Result<(), String> {
+    let _update_guard = shortcut_update_lock()
+        .lock()
+        .map_err(|_| "Shortcut update lock poisoned".to_string())?;
+
     eprintln!("Updating shortcuts with {} bindings", config.bindings.len());
 
     let mut shortcuts_to_register = Vec::new();
@@ -399,14 +409,14 @@ pub fn update_shortcuts<R: Runtime>(
     let mut registration_failures: Vec<(String, String, String)> = Vec::new();
 
     for (action_id, shortcut_str, shortcut) in shortcuts_to_register {
-        match app.global_shortcut().register(shortcut) {
+        match register_shortcut(&app, shortcut) {
             Ok(_) => {
                 eprintln!("Registered shortcut: {} -> {}", action_id, shortcut_str);
                 successfully_registered.insert(action_id, shortcut_str);
             }
             Err(e) => {
                 eprintln!("Failed to register {} shortcut: {}", action_id, e);
-                registration_failures.push((action_id, shortcut_str, e.to_string()));
+                registration_failures.push((action_id, shortcut_str, e));
             }
         }
     }
@@ -447,29 +457,40 @@ pub fn update_shortcuts<R: Runtime>(
     Ok(())
 }
 
+fn register_shortcut<R: Runtime>(app: &AppHandle<R>, shortcut: Shortcut) -> Result<(), String> {
+    match app.global_shortcut().register(shortcut) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let message = e.to_string();
+            if !message.contains("already registered") {
+                return Err(message);
+            }
+
+            app.global_shortcut()
+                .unregister(shortcut)
+                .map_err(|unregister_err| unregister_err.to_string())?;
+            app.global_shortcut()
+                .register(shortcut)
+                .map_err(|register_err| register_err.to_string())
+        }
+    }
+}
+
 /// Unregister all currently registered shortcuts
 fn unregister_all_shortcuts<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    if let Err(e) = app.global_shortcut().unregister_all() {
+        eprintln!("Failed to unregister all global shortcuts: {e}");
+    }
+
     let state = app.state::<RegisteredShortcuts>();
-    let registered = match state.shortcuts.lock() {
+    let mut registered = match state.shortcuts.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
             eprintln!("Mutex poisoned in unregister_all_shortcuts, recovering...");
             poisoned.into_inner()
         }
     };
-
-    for (action_id, shortcut_str) in registered.iter() {
-        if let Ok(shortcut) = shortcut_str.parse::<Shortcut>() {
-            match app.global_shortcut().unregister(shortcut) {
-                Ok(_) => {
-                    eprintln!("Unregistered shortcut: {} -> {}", action_id, shortcut_str);
-                }
-                Err(e) => {
-                    eprintln!("Failed to unregister shortcut {}: {}", shortcut_str, e);
-                }
-            }
-        }
-    }
+    registered.clear();
 
     Ok(())
 }

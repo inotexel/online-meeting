@@ -384,3 +384,222 @@ impl Drop for SpeakerStream {
         self._ctx.should_terminate.store(true, Ordering::Release);
     }
 }
+
+fn find_input_device_by_uid(uid: &str) -> Option<ca::Device> {
+    let all_devices = match ca::System::devices() {
+        Ok(d) => d,
+        Err(e) => {
+            error!(
+                "[find_input_device_by_uid] Failed to get system devices: {}",
+                e
+            );
+            return None;
+        }
+    };
+
+    for device in all_devices.iter() {
+        let input_buffers = device
+            .input_stream_cfg()
+            .map(|cfg| cfg.number_buffers())
+            .unwrap_or(0);
+        if input_buffers > 0 {
+            if let Ok(device_uid) = device.uid() {
+                if device_uid.to_string() == uid {
+                    return Some(device);
+                }
+            }
+        }
+    }
+
+    error!(
+        "[find_input_device_by_uid] No matching device found for UID: {}",
+        uid
+    );
+    None
+}
+
+pub struct MicInput {
+    device_uid: Option<String>,
+}
+
+pub struct MicStream {
+    consumer: HeapCons<f32>,
+    _device: ca::hardware::StartedDevice<ca::Device>,
+    _ctx: Box<MicCtx>,
+    waker_state: Arc<Mutex<WakerState>>,
+    current_sample_rate: Arc<AtomicU32>,
+}
+
+impl MicStream {
+    pub fn sample_rate(&self) -> u32 {
+        self.current_sample_rate.load(Ordering::Acquire)
+    }
+}
+
+struct MicCtx {
+    format: arc::R<av::AudioFormat>,
+    producer: HeapProd<f32>,
+    waker_state: Arc<Mutex<WakerState>>,
+    current_sample_rate: Arc<AtomicU32>,
+    consecutive_drops: Arc<AtomicU32>,
+    should_terminate: Arc<AtomicBool>,
+}
+
+impl MicInput {
+    pub fn new(device_id: Option<String>) -> Result<Self> {
+        let device_uid = device_id.filter(|id| !id.is_empty() && id != "default");
+        Ok(Self { device_uid })
+    }
+
+    pub fn stream(self) -> MicStream {
+        let input_device = match self.device_uid {
+            Some(ref uid) => find_input_device_by_uid(uid)
+                .or_else(|| ca::System::default_input_device().ok())
+                .expect("No default input device found"),
+            None => ca::System::default_input_device().expect("No default input device found"),
+        };
+
+        let asbd = input_device
+            .input_stream_cfg()
+            .expect("input stream cfg")
+            .asbd(0)
+            .expect("input asbd");
+        let format = av::AudioFormat::with_asbd(&asbd).unwrap();
+
+        let buffer_size = 1024 * 128;
+        let rb = HeapRb::<f32>::new(buffer_size);
+        let (producer, consumer) = rb.split();
+
+        let waker_state = Arc::new(Mutex::new(WakerState {
+            waker: None,
+            has_data: false,
+        }));
+
+        let current_sample_rate = Arc::new(AtomicU32::new(asbd.sample_rate as u32));
+
+        let mut ctx = Box::new(MicCtx {
+            format,
+            producer,
+            waker_state: waker_state.clone(),
+            current_sample_rate: current_sample_rate.clone(),
+            consecutive_drops: Arc::new(AtomicU32::new(0)),
+            should_terminate: Arc::new(AtomicBool::new(false)),
+        });
+
+        extern "C" fn mic_proc(
+            device: ca::Device,
+            _now: &cat::AudioTimeStamp,
+            input_data: &cat::AudioBufList<1>,
+            _input_time: &cat::AudioTimeStamp,
+            _output_data: &mut cat::AudioBufList<1>,
+            _output_time: &cat::AudioTimeStamp,
+            ctx: Option<&mut MicCtx>,
+        ) -> os::Status {
+            let ctx = ctx.unwrap();
+
+            ctx.current_sample_rate.store(
+                device
+                    .actual_sample_rate()
+                    .unwrap_or(ctx.format.absd().sample_rate) as u32,
+                Ordering::Release,
+            );
+
+            if let Some(view) =
+                av::AudioPcmBuf::with_buf_list_no_copy(&ctx.format, input_data, None)
+            {
+                if let Some(data) = view.data_f32_at(0) {
+                    process_audio_data_mic(ctx, data);
+                }
+            } else if ctx.format.common_format() == av::audio::CommonFormat::PcmF32 {
+                let first_buffer = &input_data.buffers[0];
+                let byte_count = first_buffer.data_bytes_size as usize;
+                let float_count = byte_count / std::mem::size_of::<f32>();
+
+                if float_count > 0 && !first_buffer.data.is_null() {
+                    let data = unsafe {
+                        std::slice::from_raw_parts(first_buffer.data as *const f32, float_count)
+                    };
+                    process_audio_data_mic(ctx, data);
+                }
+            }
+
+            os::Status::NO_ERR
+        }
+
+        let proc_id = input_device
+            .create_io_proc_id(mic_proc, Some(ctx.as_mut()))
+            .expect("create_io_proc_id");
+        let started_device = ca::device_start(input_device, Some(proc_id)).expect("device_start");
+
+        MicStream {
+            consumer,
+            _device: started_device,
+            _ctx: ctx,
+            waker_state,
+            current_sample_rate,
+        }
+    }
+}
+
+fn process_audio_data_mic(ctx: &mut MicCtx, data: &[f32]) {
+    let buffer_size = data.len();
+    let pushed = ctx.producer.push_slice(data);
+
+    if pushed < buffer_size {
+        let consecutive = ctx.consecutive_drops.fetch_add(1, Ordering::AcqRel) + 1;
+        if consecutive > 50 {
+            ctx.should_terminate.store(true, Ordering::Release);
+            return;
+        }
+    } else {
+        ctx.consecutive_drops.store(0, Ordering::Release);
+    }
+
+    let should_wake = {
+        let mut waker_state = ctx.waker_state.lock().unwrap();
+        if !waker_state.has_data {
+            waker_state.has_data = true;
+            waker_state.waker.take()
+        } else {
+            None
+        }
+    };
+
+    if let Some(waker) = should_wake {
+        waker.wake();
+    }
+}
+
+impl Stream for MicStream {
+    type Item = f32;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        if let Some(sample) = self.consumer.try_pop() {
+            return Poll::Ready(Some(sample));
+        }
+
+        if self._ctx.should_terminate.load(Ordering::Acquire) {
+            return match self.consumer.try_pop() {
+                Some(sample) => Poll::Ready(Some(sample)),
+                None => Poll::Ready(None),
+            };
+        }
+
+        {
+            let mut state = self.waker_state.lock().unwrap();
+            state.has_data = false;
+            state.waker = Some(cx.waker().clone());
+        }
+
+        Poll::Pending
+    }
+}
+
+impl Drop for MicStream {
+    fn drop(&mut self) {
+        self._ctx.should_terminate.store(true, Ordering::Release);
+    }
+}

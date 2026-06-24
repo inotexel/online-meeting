@@ -84,17 +84,108 @@ pub fn set_overlay_content_protected(
         .map_err(|e| format!("Failed to set content protection: {}", e))
 }
 
-#[tauri::command]
-pub fn set_window_height(window: tauri::WebviewWindow, height: u32) -> Result<(), String> {
-    use tauri::{LogicalSize, Size};
+const ORIGINAL_OVERLAY_WIDTH: f64 = 600.0;
+const COMPACT_OVERLAY_HEIGHT: f64 = 54.0;
+const DEFAULT_EXPANDED_HEIGHT: f64 = 600.0;
 
-    // Simply set the window size with fixed width and new height
-    let new_size = LogicalSize::new(600.0, height as f64);
+fn active_monitor(window: &WebviewWindow) -> Result<tauri::Monitor, String> {
     window
-        .set_size(Size::Logical(new_size))
-        .map_err(|e| format!("Failed to resize window: {}", e))?;
+        .current_monitor()
+        .or_else(|_| window.primary_monitor())
+        .map_err(|e| format!("Failed to get monitor: {}", e))?
+        .ok_or_else(|| "No monitor found".to_string())
+}
+
+fn monitor_logical_size(monitor: &tauri::Monitor) -> (f64, f64) {
+    let size = monitor.size();
+    let scale = monitor.scale_factor();
+    (
+        size.width as f64 / scale,
+        size.height as f64 / scale,
+    )
+}
+
+fn monitor_logical_origin(monitor: &tauri::Monitor) -> (f64, f64) {
+    let position = monitor.position();
+    let scale = monitor.scale_factor();
+    (
+        position.x as f64 / scale,
+        position.y as f64 / scale,
+    )
+}
+
+/// `mode`: `compact` | `fit` | `original` | `fullscreen`
+#[tauri::command]
+pub fn set_overlay_layout(
+    window: tauri::WebviewWindow,
+    mode: String,
+    height: Option<u32>,
+) -> Result<(), String> {
+    use tauri::{LogicalPosition, LogicalSize, Position, Size};
+
+    match mode.as_str() {
+        "compact" => {
+            window
+                .set_size(Size::Logical(LogicalSize::new(
+                    ORIGINAL_OVERLAY_WIDTH,
+                    COMPACT_OVERLAY_HEIGHT,
+                )))
+                .map_err(|e| format!("Failed to resize window: {}", e))?;
+            position_window_top_center(&window, TOP_OFFSET)
+                .map_err(|e| e.to_string())?;
+        }
+        "original" => {
+            let expanded_height = height
+                .map(|h| h as f64)
+                .unwrap_or(DEFAULT_EXPANDED_HEIGHT);
+            window
+                .set_size(Size::Logical(LogicalSize::new(
+                    ORIGINAL_OVERLAY_WIDTH,
+                    expanded_height,
+                )))
+                .map_err(|e| format!("Failed to resize window: {}", e))?;
+            position_window_top_center(&window, TOP_OFFSET)
+                .map_err(|e| e.to_string())?;
+        }
+        "fit" => {
+            let monitor = active_monitor(&window)?;
+            let (logical_w, logical_h) = monitor_logical_size(&monitor);
+            let fit_w = logical_w * 0.96;
+            let fit_h = logical_h * 0.92;
+            window
+                .set_size(Size::Logical(LogicalSize::new(fit_w, fit_h)))
+                .map_err(|e| format!("Failed to resize window: {}", e))?;
+            position_window_top_center(&window, TOP_OFFSET)
+                .map_err(|e| e.to_string())?;
+        }
+        "fullscreen" => {
+            let monitor = active_monitor(&window)?;
+            let (logical_w, logical_h) = monitor_logical_size(&monitor);
+            let (origin_x, origin_y) = monitor_logical_origin(&monitor);
+            window
+                .set_size(Size::Logical(LogicalSize::new(logical_w, logical_h)))
+                .map_err(|e| format!("Failed to resize window: {}", e))?;
+            window
+                .set_position(Position::Logical(LogicalPosition::new(
+                    origin_x, origin_y,
+                )))
+                .map_err(|e| format!("Failed to set window position: {}", e))?;
+        }
+        other => {
+            return Err(format!("Invalid overlay layout mode: {}", other));
+        }
+    }
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn set_window_height(window: tauri::WebviewWindow, height: u32) -> Result<(), String> {
+    if height <= COMPACT_OVERLAY_HEIGHT as u32 {
+        set_overlay_layout(window, "compact".to_string(), None)
+    } else {
+        set_overlay_layout(window, "original".to_string(), Some(height))
+    }
 }
 
 #[tauri::command]
