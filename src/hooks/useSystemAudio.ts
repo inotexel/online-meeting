@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useWindowResize, useGlobalShortcuts } from ".";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -26,7 +26,24 @@ import {
 import { Message } from "@/types/completion";
 import { TYPE_PROVIDER } from "@/types/provider.type";
 import { useMeetingMemory } from "./useMeetingMemory";
-import { formatDialogueLine } from "@/lib/memory/dialogue";
+import { useVadWhisperCoach } from "./useVadWhisperCoach";
+import { formatDialogueLine, isProspectUtterance } from "@/lib/memory/dialogue";
+import {
+  ASK_MIN_DOC_RELEVANCE_SCORE,
+  buildMeetingAskDocSearchQuery,
+  resolveOpenAiEmbeddingKey,
+  searchClientDocuments,
+  selectDocChunksForAsk,
+  streamMeetingAsk,
+} from "@/lib/memory";
+
+export type MeetingAskBridge = {
+  active: boolean;
+  streamAsk: (
+    question: string,
+    signal: AbortSignal
+  ) => AsyncGenerator<string, void, unknown>;
+};
 
 export type CaptureMode = "vad" | "continuous" | "realtime";
 
@@ -194,6 +211,7 @@ export function useSystemAudio() {
   const realtimePendingByItemRef = useRef<
     Record<string, { text: string; speakerLabel?: string | null }>
   >({});
+  const vadSequenceRef = useRef(0);
   const captureModeRef = useRef<CaptureMode>(getCaptureMode(DEFAULT_VAD_CONFIG));
   const realtimeSpeakerLabelsRef = useRef<boolean>(
     DEFAULT_VAD_CONFIG.realtime_speaker_labels ?? false
@@ -231,10 +249,28 @@ export function useSystemAudio() {
   const aiProvider = allAiProviders.find(
     (p) => p.id === selectedAIProvider.provider
   );
+  const embeddingApiKey = useMemo(
+    () =>
+      resolveOpenAiEmbeddingKey(
+        selectedSttProvider.variables,
+        selectedAIProvider.variables
+      ),
+    [selectedSttProvider.variables, selectedAIProvider.variables]
+  );
   const meetingMemory = useMeetingMemory({
     provider: aiProvider,
     selectedProvider: selectedAIProvider,
-    openaiApiKey: getSttApiKey(selectedSttProvider.variables),
+    openaiApiKey: embeddingApiKey,
+  });
+
+  const vadWhisperCoach = useVadWhisperCoach({
+    provider: aiProvider,
+    selectedProvider: selectedAIProvider,
+    clientContext: meetingMemory.clientContext,
+    clientId: meetingMemory.clientId,
+    clientName: meetingMemory.clientName,
+    knowledgeConfigured: meetingMemory.knowledgeConfigured,
+    openaiApiKey: embeddingApiKey,
   });
 
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -245,7 +281,12 @@ export function useSystemAudio() {
   const SCROLL_BOTTOM_THRESHOLD_PX = 72;
 
   const getOverlayScrollViewport = useCallback(() => {
-    return scrollAreaRef.current?.querySelector(
+    const root = scrollAreaRef.current;
+    if (!root) return null;
+    if (root.dataset.slot === "scroll-area-viewport") {
+      return root;
+    }
+    return root.querySelector(
       "[data-slot='scroll-area-viewport']"
     ) as HTMLElement | null;
   }, []);
@@ -286,6 +327,14 @@ export function useSystemAudio() {
     if (savedVadConfig) {
       try {
         const parsed = JSON.parse(savedVadConfig);
+        const legacyMode =
+          parsed.capture_mode ??
+          (parsed.enabled === false ? "continuous" : "vad");
+        if (legacyMode === "continuous") {
+          parsed.capture_mode = "vad";
+          parsed.enabled = true;
+          safeLocalStorage.setItem("vad_config", JSON.stringify(parsed));
+        }
         setVadConfig(parsed);
         captureModeRef.current = getCaptureMode(parsed);
       } catch (error) {
@@ -497,6 +546,10 @@ export function useSystemAudio() {
             speakerLabel: payload.speakerLabel ?? null,
             sequenceNum,
           });
+
+          if (isProspectUtterance(payload.speakerLabel)) {
+            void vadWhisperCoach.feedProspectLine(text);
+          }
         });
 
         await registerListener("transcript-speaker-revision", (event) => {
@@ -572,6 +625,7 @@ export function useSystemAudio() {
     meetingMemory.appendUtterance,
     touchRealtimeActivity,
     clearRealtimePending,
+    vadWhisperCoach.feedProspectLine,
   ]);
 
   // Keep UI in sync when Rust ends capture (WS drop, audio error, etc.)
@@ -623,7 +677,8 @@ export function useSystemAudio() {
         speechUnlisten = await listen("speech-detected", async (event) => {
           try {
             if (!capturing) return;
-            if (getCaptureMode(vadConfig) === "realtime") return;
+            const mode = getCaptureMode(vadConfig);
+            if (mode === "realtime") return;
 
             const base64Audio = event.payload as string;
             // Convert to blob
@@ -675,6 +730,19 @@ export function useSystemAudio() {
                 setLastTranscription(transcription);
                 setError("");
 
+                if (mode === "vad") {
+                  const utteranceId = `vad_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+                  const sequenceNum = vadSequenceRef.current++;
+                  void meetingMemory.appendUtterance({
+                    utteranceId,
+                    text: transcription,
+                    speakerLabel: "client",
+                    sequenceNum,
+                  });
+                  await vadWhisperCoach.feedProspectLine(transcription);
+                  return;
+                }
+
                 const effectiveSystemPrompt = useSystemPrompt
                   ? systemPrompt || DEFAULT_SYSTEM_PROMPT
                   : contextContent || DEFAULT_SYSTEM_PROMPT;
@@ -718,6 +786,8 @@ export function useSystemAudio() {
     allSttProviders,
     conversation.messages.length,
     vadConfig,
+    vadWhisperCoach.feedProspectLine,
+    meetingMemory.appendUtterance,
   ]);
 
   const buildCaptureInvokeArgs = useCallback(
@@ -918,6 +988,7 @@ export function useSystemAudio() {
     lastRealtimeActivityRef.current = Date.now();
     setRealtimeSegments([]);
     clearRealtimePending();
+    vadWhisperCoach.reset();
 
     const deviceId =
       selectedAudioDevices.output.id !== "default"
@@ -1137,6 +1208,7 @@ export function useSystemAudio() {
       });
 
       setCapturing(true);
+      capturingRef.current = true;
       setIsPopoverOpen(true);
       void resizeWindow(true, {
         originalHeight: isRealtime ? 680 : 600,
@@ -1166,13 +1238,28 @@ export function useSystemAudio() {
       }
 
       // VAD mode: Start recording immediately
-      await invoke<string>("stop_system_audio_capture");
+      if (mode === "vad") {
+        const sessionId = `vad_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+        vadSequenceRef.current = 0;
+        vadWhisperCoach.reset();
+        await meetingMemory.refreshKnowledgeConfigured();
+        await meetingMemory.startGraphMeeting(sessionId);
+      }
 
-      const { args } = buildCaptureInvokeArgs(vadConfig);
-      await invoke<string>("start_system_audio_capture", args);
+      isRestartingCaptureRef.current = true;
+      try {
+        await invoke<string>("stop_system_audio_capture");
+
+        const { args } = buildCaptureInvokeArgs(vadConfig);
+        await invoke<string>("start_system_audio_capture", args);
+      } finally {
+        isRestartingCaptureRef.current = false;
+      }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       setError(errorMessage);
+      setCapturing(false);
+      capturingRef.current = false;
       setIsPopoverOpen(true);
     }
   }, [
@@ -1181,6 +1268,8 @@ export function useSystemAudio() {
     buildCaptureInvokeArgs,
     startRealtimeCapture,
     resizeWindow,
+    vadWhisperCoach.reset,
+    meetingMemory,
   ]);
 
   const stopCapture = useCallback(async () => {
@@ -1197,6 +1286,8 @@ export function useSystemAudio() {
       await invoke<string>("stop_system_audio_capture");
 
       await meetingMemory.endGraphMeeting();
+      vadSequenceRef.current = 0;
+      vadWhisperCoach.reset();
 
       // Reset ALL states
       setCapturing(false);
@@ -1222,7 +1313,7 @@ export function useSystemAudio() {
       console.error("Stop capture error:", err);
       isStoppingCaptureRef.current = false;
     }
-  }, [clearRealtimePending, meetingMemory]);
+  }, [clearRealtimePending, meetingMemory, vadWhisperCoach.reset]);
 
   // Detect stalled transcription while UI still shows Stop
   useEffect(() => {
@@ -1279,22 +1370,6 @@ export function useSystemAudio() {
     realtimePendingSpeakerLabel,
     meetingMemory.setLiveTranscriptSnapshot,
   ]);
-
-  // Periodic memory sync + live coaching during realtime capture
-  const runCoachCycleRef = useRef(meetingMemory.runCoachCycle);
-  runCoachCycleRef.current = meetingMemory.runCoachCycle;
-
-  useEffect(() => {
-    if (!isRealtimeSessionActive || !capturing) return;
-
-    void runCoachCycleRef.current(true);
-
-    const interval = window.setInterval(() => {
-      void runCoachCycleRef.current();
-    }, 15_000);
-
-    return () => window.clearInterval(interval);
-  }, [isRealtimeSessionActive, capturing]);
 
   // Manual stop for continuous recording
   const manualStopAndSend = useCallback(async () => {
@@ -1628,6 +1703,77 @@ export function useSystemAudio() {
     ignoreContinuousRecording,
   ]);
 
+  const streamMeetingAskQuestion = useCallback(
+    async function* (question: string, signal: AbortSignal) {
+      const trimmed = question.trim();
+      if (!trimmed) return;
+
+      let recentTranscript = meetingMemory.getMeetingTranscriptForAsk();
+      const prospectLines = vadWhisperCoach.getRecentProspectLines();
+      if (!recentTranscript && prospectLines.length > 0) {
+        recentTranscript = prospectLines.join("\n");
+      }
+
+      const clientContext = await meetingMemory.refreshClientContext();
+
+      let docChunks: Awaited<ReturnType<typeof searchClientDocuments>> = [];
+      const searchQuery = buildMeetingAskDocSearchQuery(
+        trimmed,
+        recentTranscript
+      );
+
+      if (
+        meetingMemory.knowledgeConfigured &&
+        meetingMemory.clientId &&
+        embeddingApiKey &&
+        searchQuery
+      ) {
+        try {
+          docChunks = await searchClientDocuments({
+            clientId: meetingMemory.clientId,
+            query: searchQuery,
+            openaiApiKey: embeddingApiKey,
+            limit: 5,
+            minScore: ASK_MIN_DOC_RELEVANCE_SCORE,
+          });
+        } catch (error) {
+          console.error("Meeting ask doc search failed:", error);
+        }
+      }
+
+      const relevantDocChunks = selectDocChunksForAsk(
+        docChunks.map((chunk) => ({
+          documentTitle: chunk.documentTitle,
+          text: chunk.text,
+          score: chunk.score,
+        }))
+      );
+
+      yield* streamMeetingAsk({
+        provider: aiProvider,
+        selectedProvider: selectedAIProvider,
+        question: trimmed,
+        brainState: vadWhisperCoach.getBrainState(),
+        clientContext: clientContext ?? meetingMemory.clientContext,
+        docChunks: relevantDocChunks,
+        recentTranscript,
+        signal,
+      });
+    },
+    [
+      aiProvider,
+      embeddingApiKey,
+      meetingMemory,
+      selectedAIProvider,
+      vadWhisperCoach,
+    ]
+  );
+
+  const meetingAskActive =
+    meetingMemory.knowledgeConfigured &&
+    Boolean(meetingMemory.clientName.trim()) &&
+    Boolean(meetingMemory.clientId);
+
   return {
     capturing,
     isProcessing,
@@ -1684,17 +1830,36 @@ export function useSystemAudio() {
     meetingClientName: meetingMemory.clientName,
     setMeetingClientName: meetingMemory.setClientName,
     meetingClientId: meetingMemory.clientId,
-    openaiApiKey: getSttApiKey(selectedSttProvider.variables),
+    openaiApiKey: embeddingApiKey,
     knowledgeConfigured: meetingMemory.knowledgeConfigured,
     knowledgeStatus: meetingMemory.knowledgeStatus,
     clientGraphContext: meetingMemory.clientContext,
-    coachSuggestions: meetingMemory.coachSuggestions,
     isMemorySyncing: meetingMemory.isMemorySyncing,
-    coachStatus: meetingMemory.coachStatus,
-    coachLastError: meetingMemory.coachLastError,
+    memorySyncError: meetingMemory.memorySyncError,
     coachBlockedReason: meetingMemory.coachBlockedReason,
     testKnowledgeConnection: meetingMemory.testConnection,
     refreshClientGraphContext: meetingMemory.refreshClientContext,
+    // Sybill sync
+    sybillApiKey: meetingMemory.sybillApiKey,
+    setSybillApiKey: meetingMemory.setSybillApiKey,
+    sybillSyncing: meetingMemory.sybillSyncing,
+    sybillStatus: meetingMemory.sybillStatus,
+    sybillResult: meetingMemory.sybillResult,
+    sybillCard: meetingMemory.sybillCard,
+    knownClients: meetingMemory.knownClients,
+    refreshKnownClients: meetingMemory.refreshKnownClients,
+    runSybillSync: meetingMemory.runSybillSync,
+    cancelSybillSync: meetingMemory.cancelSybillSync,
+    // VAD auto-detect whisper coach
+    vadWhisper: vadWhisperCoach.whisper,
+    vadWhisperLastProspectLine: vadWhisperCoach.lastProspectLine,
+    vadWhisperCoachStatus: vadWhisperCoach.coachStatus,
+    vadWhisperCoachLastError: vadWhisperCoach.coachLastError,
+    vadWhisperCoachBlockedReason: vadWhisperCoach.coachBlockedReason,
+    vadWhisperIsThinking: vadWhisperCoach.isThinking,
+    vadWhisperMeetingStage: vadWhisperCoach.meetingStage,
+    meetingAskActive,
+    streamMeetingAskQuestion,
     // Scroll area ref for keyboard navigation
     scrollAreaRef,
   };

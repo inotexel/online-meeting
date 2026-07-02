@@ -6,6 +6,7 @@ mod db;
 mod knowledge;
 mod calendar;
 mod shortcuts;
+mod sybill;
 mod window;
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
@@ -131,10 +132,16 @@ pub fn run() {
             knowledge::knowledge_append_utterance,
             knowledge::knowledge_apply_memory,
             knowledge::knowledge_get_client_context,
+            knowledge::knowledge_list_clients,
+            knowledge::knowledge_sybill_meeting_exists,
+            knowledge::knowledge_import_sybill_meeting,
             knowledge::knowledge_ingest_document,
             knowledge::knowledge_list_documents,
             knowledge::knowledge_delete_document,
             knowledge::knowledge_search_client_docs,
+            sybill::sybill_health_check,
+            sybill::sybill_list_conversations,
+            sybill::sybill_get_conversation,
             calendar::calendar_is_configured,
             calendar::calendar_get_status,
             calendar::calendar_connect,

@@ -17,6 +17,7 @@ interface UpcomingCalendarMeetingsProps {
   onDisconnect: () => void;
   onRefresh: () => void;
   onSelectMeeting: (suggestedClientName: string) => void;
+  embedded?: boolean;
 }
 
 export function UpcomingCalendarMeetings({
@@ -32,10 +33,17 @@ export function UpcomingCalendarMeetings({
   onDisconnect,
   onRefresh,
   onSelectMeeting,
+  embedded = false,
 }: UpcomingCalendarMeetingsProps) {
   if (!configured) {
     return (
-      <div className="rounded-lg border border-border/50 bg-muted/20 p-2.5 text-[10px] text-muted-foreground">
+      <div
+        className={
+          embedded
+            ? "text-xs text-muted-foreground"
+            : "rounded-lg border border-border/50 bg-muted/20 p-2.5 text-xs text-muted-foreground"
+        }
+      >
         Add <span className="font-mono">GOOGLE_CLIENT_ID</span> to{" "}
         <span className="font-mono">src-tauri/.env</span> to enable Google
         Calendar. Use redirect URI{" "}
@@ -45,73 +53,69 @@ export function UpcomingCalendarMeetings({
     );
   }
 
-  return (
-    <div className="rounded-lg border border-border/50 bg-muted/30 p-2.5 space-y-2">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 text-[10px] font-medium">
-          <CalendarIcon className="w-3.5 h-3.5" />
-          Upcoming meetings
-        </div>
-        <div className="flex items-center gap-1">
-          {connected && (
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              className="h-6 px-2 text-[9px]"
-              disabled={disabled || loading}
-              onClick={() => void onRefresh()}
-            >
-              <RefreshCwIcon
-                className={cn("w-3 h-3", loading && "animate-spin")}
-              />
-            </Button>
-          )}
-          {connected ? (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              className="h-6 px-2 text-[9px]"
-              disabled={disabled || connecting}
-              onClick={() => void onDisconnect()}
-            >
-              Disconnect
-            </Button>
+  const controls = (
+    <div className="flex items-center gap-1">
+      {connected && (
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="h-7 px-2 text-xs"
+          disabled={disabled || loading}
+          onClick={() => void onRefresh()}
+        >
+          <RefreshCwIcon className={cn("w-3 h-3", loading && "animate-spin")} />
+        </Button>
+      )}
+      {connected ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-7 px-2 text-xs"
+          disabled={disabled || connecting}
+          onClick={() => void onDisconnect()}
+        >
+          Disconnect
+        </Button>
+      ) : (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-7 px-2 text-xs"
+          disabled={disabled || connecting}
+          onClick={() => void onConnect()}
+        >
+          {connecting ? (
+            <>
+              <LoaderIcon className="w-3 h-3 mr-1 animate-spin" />
+              Connecting…
+            </>
           ) : (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              className="h-6 px-2 text-[9px]"
-              disabled={disabled || connecting}
-              onClick={() => void onConnect()}
-            >
-              {connecting ? (
-                <>
-                  <LoaderIcon className="w-3 h-3 mr-1 animate-spin" />
-                  Connecting…
-                </>
-              ) : (
-                "Connect Google"
-              )}
-            </Button>
+            "Connect Google"
           )}
-        </div>
-      </div>
+        </Button>
+      )}
+    </div>
+  );
 
-      {error && (
-        <p className="text-[9px] text-red-600 leading-snug">{error}</p>
+  const body = (
+    <>
+      {embedded && (
+        <div className="flex items-center justify-end mb-2">{controls}</div>
       )}
 
+      {error && <p className="text-xs text-red-600 leading-snug">{error}</p>}
+
       {!connected && !error && (
-        <p className="text-[9px] text-muted-foreground">
+        <p className="text-xs text-muted-foreground">
           Connect Google Calendar to pick a client from your next meetings.
         </p>
       )}
 
       {connected && !loading && meetings.length === 0 && !error && (
-        <p className="text-[9px] text-muted-foreground">
+        <p className="text-xs text-muted-foreground">
           No upcoming meetings on your primary calendar.
         </p>
       )}
@@ -128,7 +132,7 @@ export function UpcomingCalendarMeetings({
                 disabled={disabled}
                 onClick={() => onSelectMeeting(meeting.suggestedClientName)}
                 className={cn(
-                  "w-full text-left rounded-md border px-2 py-1.5 transition-colors",
+                  "w-full text-left rounded-lg border px-3 py-2 transition-colors",
                   "hover:bg-background/80 disabled:opacity-50 disabled:pointer-events-none",
                   isSelected
                     ? "border-primary/60 bg-primary/5"
@@ -136,20 +140,20 @@ export function UpcomingCalendarMeetings({
                 )}
               >
                 <div className="flex items-start justify-between gap-2">
-                  <p className="text-[10px] font-medium leading-snug line-clamp-2">
+                  <p className="text-sm font-medium leading-snug line-clamp-2">
                     {meeting.title}
                   </p>
                   {meeting.startLabel && (
-                    <span className="text-[9px] text-muted-foreground shrink-0">
+                    <span className="text-xs text-muted-foreground shrink-0">
                       {meeting.startLabel}
                     </span>
                   )}
                 </div>
-                <p className="text-[9px] text-muted-foreground mt-0.5 line-clamp-1">
+                <p className="text-xs text-muted-foreground mt-0.5 line-clamp-1">
                   With {meeting.withWhom}
                 </p>
                 {isSelected && (
-                  <p className="text-[9px] text-primary mt-0.5">
+                  <p className="text-xs text-primary mt-1">
                     Client set to {meeting.suggestedClientName}
                   </p>
                 )}
@@ -158,6 +162,23 @@ export function UpcomingCalendarMeetings({
           })}
         </div>
       )}
+    </>
+  );
+
+  if (embedded) {
+    return <div className="space-y-2">{body}</div>;
+  }
+
+  return (
+    <div className="rounded-lg border border-border/50 bg-muted/30 p-2.5 space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 text-xs font-medium">
+          <CalendarIcon className="w-3.5 h-3.5" />
+          Upcoming meetings
+        </div>
+        {controls}
+      </div>
+      {body}
     </div>
   );
 }

@@ -26,6 +26,12 @@ const App = () => {
     }
   };
 
+  const meetingAsk = {
+    active: Boolean(systemAudio?.meetingAskActive),
+    streamAsk: systemAudio.streamMeetingAskQuestion,
+  };
+  const showCompletionBar = !systemAudio?.isPopoverOpen;
+
   return (
     <ErrorBoundary
       fallbackRender={() => {
@@ -44,65 +50,26 @@ const App = () => {
         <Card className="w-full flex flex-row items-center gap-2 p-2">
           <SystemAudio {...systemAudio} />
           {systemAudio?.capturing ? (
-            <div className="flex flex-row items-center gap-2 justify-between w-full min-w-0">
-              <div className="flex flex-1 items-center gap-2 min-w-0">
-                <AudioVisualizer isRecording={systemAudio?.capturing} />
-                {systemAudio.isRealtimeMode ? (
-                  <p
-                    className="flex-1 min-w-0 text-[10px] leading-snug text-foreground truncate"
-                    title={
-                      systemAudio.realtimePendingDelta ||
-                      systemAudio.realtimeSegments[
-                        systemAudio.realtimeSegments.length - 1
-                      ]?.text ||
-                      ""
-                    }
-                  >
-                    {systemAudio.realtimePendingDelta ||
-                    systemAudio.realtimeSegments[
-                      systemAudio.realtimeSegments.length - 1
-                    ]?.text ? (
-                      <>
-                        <span className="font-semibold text-primary">
-                          Live:{" "}
-                        </span>
-                        {systemAudio.realtimePendingDelta ||
-                          systemAudio.realtimeSegments[
-                            systemAudio.realtimeSegments.length - 1
-                          ]?.text}
-                      </>
-                    ) : systemAudio.isRealtimeSessionActive ? (
-                      <span className="text-muted-foreground">
-                        Listening for speech…
-                      </span>
-                    ) : (
-                      <span className="text-muted-foreground">
-                        Connecting to transcription…
-                      </span>
-                    )}
-                  </p>
-                ) : null}
-              </div>
-              <div className="flex !w-fit items-center gap-2">
-                <StatusIndicator
-                  setupRequired={systemAudio.setupRequired}
-                  error={systemAudio.error}
-                  isProcessing={systemAudio.isProcessing}
-                  isAIProcessing={systemAudio.isAIProcessing}
-                  capturing={systemAudio.capturing}
-                />
-              </div>
+            <div className="flex flex-row items-center gap-2 justify-end w-full min-w-0">
+              <AudioVisualizer isRecording={systemAudio?.capturing} />
+              <StatusIndicator
+                setupRequired={systemAudio.setupRequired}
+                error={systemAudio.error}
+                isProcessing={systemAudio.isProcessing}
+                isAIProcessing={systemAudio.isAIProcessing}
+                capturing={systemAudio.capturing}
+              />
             </div>
           ) : null}
 
           <div
             className={`${
-              systemAudio?.capturing
-                ? "hidden w-full fade-out transition-all duration-300"
-                : "w-full flex flex-row gap-2 items-center"
+              showCompletionBar
+                ? "w-full flex flex-row gap-2 items-center"
+                : "hidden w-full fade-out transition-all duration-300"
             }`}
           >
-            <Completion isHidden={isHidden} />
+            <Completion isHidden={isHidden} meetingAsk={meetingAsk} />
             <Button
               size={"icon"}
               className="cursor-pointer"

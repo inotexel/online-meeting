@@ -64,6 +64,7 @@ interface SettingsPanelProps {
   contextContent: string;
   setContextContent: (content: string) => void;
   captureMode: CaptureMode;
+  embedded?: boolean;
 }
 
 export const SettingsPanel = ({
@@ -74,20 +75,23 @@ export const SettingsPanel = ({
   contextContent,
   setContextContent,
   captureMode,
+  embedded = false,
 }: SettingsPanelProps) => {
   const isVadMode = captureMode === "vad";
   const isContinuousMode = captureMode === "continuous";
   const isRealtimeMode = captureMode === "realtime";
 
-  const [isOpen, setIsOpen] = useState(isRealtimeMode);
+  const [isOpen, setIsOpen] = useState(isRealtimeMode || embedded);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [selectedTemplate, setSelectedTemplate] = useState<string>("");
 
   useEffect(() => {
-    if (isRealtimeMode) {
+    if (isRealtimeMode || embedded) {
       setIsOpen(true);
     }
-  }, [isRealtimeMode]);
+  }, [isRealtimeMode, embedded]);
+
+  const showAiContext = !embedded && !isRealtimeMode && !isVadMode;
 
   // Determine current sensitivity preset based on values
   const getCurrentPreset = (): SensitivityPreset | "custom" => {
@@ -144,29 +148,8 @@ export const SettingsPanel = ({
     onUpdateVadConfig(defaultConfig);
   };
 
-  return (
-    <div className="rounded-lg border border-border/50 bg-muted/30 overflow-hidden">
-      {/* Settings Header - Always visible */}
-      <button
-        type="button"
-        onClick={() => setIsOpen(!isOpen)}
-        className="w-full flex items-center justify-between p-3 hover:bg-muted/50 transition-colors"
-      >
-        <div className="flex items-center gap-2">
-          <SettingsIcon className="w-3.5 h-3.5 text-muted-foreground" />
-          <span className="text-xs font-medium">Settings</span>
-        </div>
-        <ChevronDownIcon
-          className={cn(
-            "w-4 h-4 text-muted-foreground transition-transform",
-            isOpen && "rotate-180"
-          )}
-        />
-      </button>
-
-      {/* Settings Content */}
-      {isOpen && (
-        <div className="px-3 pb-3 space-y-4">
+  const settingsBody = (
+    <div className={embedded ? "space-y-4" : "px-3 pb-3 space-y-4"}>
           {/* Recording Settings Section */}
           <div className="space-y-3">
             <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
@@ -367,8 +350,8 @@ export const SettingsPanel = ({
             )}
           </div>
 
-          {/* Context Section - hidden in realtime mode */}
-          {!isRealtimeMode && (
+          {/* Context Section — manual mode only */}
+          {showAiContext && (
           <div className="space-y-3 pt-3 border-t border-border/50">
             <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
               AI Context
@@ -542,8 +525,32 @@ export const SettingsPanel = ({
               </div>
             )}
           </div>
+    </div>
+  );
+
+  if (embedded) {
+    return settingsBody;
+  }
+
+  return (
+    <div className="rounded-lg border border-border/50 bg-muted/30 overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setIsOpen(!isOpen)}
+        className="w-full flex items-center justify-between p-3 hover:bg-muted/50 transition-colors"
+      >
+        <div className="flex items-center gap-2">
+          <SettingsIcon className="w-3.5 h-3.5 text-muted-foreground" />
+          <span className="text-xs font-medium">Settings</span>
         </div>
-      )}
+        <ChevronDownIcon
+          className={cn(
+            "w-4 h-4 text-muted-foreground transition-transform",
+            isOpen && "rotate-180"
+          )}
+        />
+      </button>
+      {isOpen && settingsBody}
     </div>
   );
 };

@@ -84,6 +84,7 @@ export async function searchClientDocuments(params: {
   query: string;
   openaiApiKey: string;
   limit?: number;
+  minScore?: number;
 }): Promise<DocChunkHit[]> {
   const rows = await invoke<
     Array<{
@@ -99,6 +100,7 @@ export async function searchClientDocuments(params: {
       query: params.query,
       openaiApiKey: params.openaiApiKey,
       limit: params.limit ?? 5,
+      minScore: params.minScore,
     },
   });
 

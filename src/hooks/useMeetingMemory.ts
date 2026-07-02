@@ -12,13 +12,13 @@ import {
 
   extractMeetingMemory,
 
-  generateCoachSuggestions,
-
   getClientGraphContext,
 
   isKnowledgeConfigured,
 
-  searchClientDocuments,
+  listKnownClients,
+
+  KnownClient,
 
   slugifyClientId,
 
@@ -27,14 +27,14 @@ import {
   testKnowledgeConnection,
 
 } from "@/lib/memory";
-import { formatDialogueLine } from "@/lib/memory/dialogue";
-import { docChunkToSuggestion } from "@/lib/memory/coach-doc-provenance";
 import {
-  buildDocSearchQuery,
-  filterRelevantDocChunks,
-} from "@/lib/memory/doc-search";
+  syncSybillMeetings,
+  SybillSyncProgress,
+  SybillSyncResult,
+} from "@/lib/sybill";
+import { formatDialogueLine } from "@/lib/memory/dialogue";
 
-import { CoachSuggestion, ClientGraphContext } from "@/lib/memory/types";
+import { ClientGraphContext } from "@/lib/memory/types";
 
 import { safeLocalStorage } from "@/lib";
 import { shouldUsePluelyAPI } from "@/lib/functions/pluely.api";
@@ -43,9 +43,7 @@ import { shouldUsePluelyAPI } from "@/lib/functions/pluely.api";
 
 const CLIENT_NAME_KEY = "pluely_meeting_client_name";
 
-const COACH_TICK_MS = 15_000;
-
-const RECENT_UTTERANCE_LIMIT = 24;
+const SYBILL_API_KEY = "pluely_sybill_api_key";
 
 
 
@@ -79,15 +77,20 @@ export function useMeetingMemory(ai: {
 
   );
 
-  const [coachSuggestions, setCoachSuggestions] = useState<CoachSuggestion[]>(
-
-    []
-
-  );
-
   const [isMemorySyncing, setIsMemorySyncing] = useState(false);
-  const [coachStatus, setCoachStatus] = useState("");
-  const [coachLastError, setCoachLastError] = useState("");
+  const [memorySyncError, setMemorySyncError] = useState("");
+
+  const [sybillApiKey, setSybillApiKeyState] = useState(
+    () => safeLocalStorage.getItem(SYBILL_API_KEY) ?? ""
+  );
+  const [knownClients, setKnownClients] = useState<KnownClient[]>([]);
+  const [sybillSyncing, setSybillSyncing] = useState(false);
+  const [sybillStatus, setSybillStatus] = useState("");
+  const [sybillResult, setSybillResult] = useState<SybillSyncResult | null>(
+    null
+  );
+  const [sybillCard, setSybillCard] = useState<SybillSyncProgress | null>(null);
+  const sybillAbortRef = useRef<AbortController | null>(null);
 
 
 
@@ -99,22 +102,10 @@ export function useMeetingMemory(ai: {
 
   const meetingUtterancesRef = useRef<string[]>([]);
 
-  const lastCoachTickRef = useRef(0);
-
   const syncInFlightRef = useRef(false);
 
   const abortRef = useRef<AbortController | null>(null);
   const liveTranscriptSnapshotRef = useRef("");
-
-
-
-  const getRecentMeetingTranscript = useCallback(() => {
-
-    return meetingUtterancesRef.current.slice(-RECENT_UTTERANCE_LIMIT).join("\n");
-
-  }, []);
-
-
 
   const setClientName = useCallback((name: string) => {
 
@@ -196,7 +187,6 @@ export function useMeetingMemory(ai: {
       graphMeetingIdRef.current = meetingId;
       transcriptBufferRef.current = [];
       meetingUtterancesRef.current = [];
-      lastCoachTickRef.current = Date.now();
 
       const configured = await isKnowledgeConfigured();
       setKnowledgeConfigured(configured);
@@ -237,41 +227,25 @@ export function useMeetingMemory(ai: {
 
 
 
-  const runCoachCycle = useCallback(
-
-    async (force = false) => {
-      if (!graphMeetingIdRef.current) {
-        setCoachStatus("Waiting for meeting to start…");
-        return;
-      }
+  const syncMeetingMemory = useCallback(
+    async () => {
+      if (!graphMeetingIdRef.current) return;
 
       const activeClientId =
         clientIdRef.current || slugifyClientId(clientName.trim());
-      if (!activeClientId) {
-        setCoachStatus("Waiting for client name…");
-        return;
-      }
+      if (!activeClientId) return;
       clientIdRef.current = activeClientId;
 
       if (syncInFlightRef.current) return;
 
-      const now = Date.now();
-      if (!force && now - lastCoachTickRef.current < COACH_TICK_MS) return;
-
-      const recentTranscript =
-        getRecentMeetingTranscript().trim() ||
-        liveTranscriptSnapshotRef.current.trim();
       const extractionTranscript = transcriptBufferRef.current.join("\n").trim();
-      if (!recentTranscript && !extractionTranscript) {
-        setCoachStatus("Waiting for transcript…");
-        return;
-      }
+      if (!extractionTranscript) return;
 
       if (!knowledgeConfigured) {
         const configured = await isKnowledgeConfigured();
         setKnowledgeConfigured(configured);
         if (!configured) {
-          setCoachLastError(
+          setMemorySyncError(
             "Neo4j not configured. Add NEO4J_* vars to src-tauri/.env and restart."
           );
           return;
@@ -280,147 +254,58 @@ export function useMeetingMemory(ai: {
 
       const usePluelyApi = await shouldUsePluelyAPI();
       if (!ai.provider && !usePluelyApi) {
-        setCoachLastError(
-          "Select a valid AI provider in Dev Space — coach needs it for suggestions."
+        setMemorySyncError(
+          "Select a valid AI provider in Dev Space — memory sync needs it."
         );
         return;
       }
 
       syncInFlightRef.current = true;
       setIsMemorySyncing(true);
-      setCoachLastError("");
+      setMemorySyncError("");
       const cycleAbort = new AbortController();
       abortRef.current = cycleAbort;
-      lastCoachTickRef.current = now;
 
       try {
         let context = await refreshClientContext();
 
-        if (extractionTranscript) {
-          try {
-            const memoryResult = await extractMeetingMemory({
-              provider: ai.provider,
-              selectedProvider: ai.selectedProvider,
-              clientName: clientName.trim() || "Client",
-              recentTranscript: extractionTranscript,
-              existingContext: context ?? null,
-              signal: cycleAbort.signal,
-            });
-
-            if (memoryResult.parsed) {
-              await applyMemoryToGraph(
-                clientIdRef.current,
-                graphMeetingIdRef.current,
-                memoryResult.extraction
-              );
-              transcriptBufferRef.current = [];
-            } else if (memoryResult.error) {
-              setCoachLastError(memoryResult.error);
-            }
-          } catch (error) {
-            console.error("Memory extraction failed:", error);
-          }
-        }
-
-        context =
-          (await refreshClientContext()) ??
-          context ?? {
-            clientId: clientIdRef.current,
-            clientName: clientName.trim() || "Client",
-            facts: [],
-            openObjections: [],
-            openQuestions: [],
-            openActions: [],
-            meetingCount: 0,
-          };
-
-        const coachTranscript = recentTranscript || extractionTranscript;
-
-        let docChunks: Awaited<ReturnType<typeof searchClientDocuments>> = [];
-        if (ai.openaiApiKey?.trim() && coachTranscript) {
-          try {
-            const searchQuery = buildDocSearchQuery(coachTranscript);
-            if (searchQuery) {
-              docChunks = await searchClientDocuments({
-                clientId: clientIdRef.current,
-                query: searchQuery,
-                openaiApiKey: ai.openaiApiKey.trim(),
-                limit: 5,
-              });
-            }
-          } catch (error) {
-            console.error("Document search failed:", error);
-          }
-        }
-
-        const relevantDocChunks = filterRelevantDocChunks(
-          docChunks.map((chunk) => ({
-            documentTitle: chunk.documentTitle,
-            text: chunk.text,
-            score: chunk.score,
-          }))
-        );
-
-        if (!context) {
-          setCoachLastError("Could not load client context from Neo4j.");
-          return;
-        }
-
-        const coach = await generateCoachSuggestions({
+        const memoryResult = await extractMeetingMemory({
           provider: ai.provider,
           selectedProvider: ai.selectedProvider,
-          clientContext: context,
-          recentTranscript: coachTranscript,
-          docChunks: relevantDocChunks,
+          clientName: clientName.trim() || "Client",
+          recentTranscript: extractionTranscript,
+          existingContext: context ?? null,
           signal: cycleAbort.signal,
         });
 
-        if (coach.error) {
-          setCoachLastError(coach.error);
-          setCoachStatus("Coach cycle failed");
-          return;
-        }
-
-        let suggestions = coach.suggestions;
-        if (suggestions.length === 0 && coachTranscript.length > 20) {
-          const topRelevant = relevantDocChunks[0];
-          if (topRelevant) {
-            suggestions = [docChunkToSuggestion(topRelevant)];
-          }
-        }
-
-        if (suggestions.length > 0) {
-          setCoachSuggestions(suggestions);
-          setCoachStatus(
-            `${suggestions.length} tip${suggestions.length === 1 ? "" : "s"} · ${new Date().toLocaleTimeString()}`
+        if (memoryResult.parsed) {
+          await applyMemoryToGraph(
+            clientIdRef.current,
+            graphMeetingIdRef.current,
+            memoryResult.extraction
           );
-        } else {
-          setCoachStatus(
-            `No substantive speech yet · ${new Date().toLocaleTimeString()}`
-          );
+          transcriptBufferRef.current = [];
+          await refreshClientContext();
+        } else if (memoryResult.error) {
+          setMemorySyncError(memoryResult.error);
         }
       } catch (error) {
         const message =
           error instanceof Error ? error.message : String(error);
-        console.error("Coach cycle failed:", error);
-        setCoachLastError(message);
-        setCoachStatus("Coach cycle failed");
+        console.error("Meeting memory sync failed:", error);
+        setMemorySyncError(message);
       } finally {
         syncInFlightRef.current = false;
         setIsMemorySyncing(false);
       }
     },
-
     [
-      ai.openaiApiKey,
       ai.provider,
       ai.selectedProvider,
       clientName,
-      getRecentMeetingTranscript,
       knowledgeConfigured,
       refreshClientContext,
     ]
-
   );
 
 
@@ -480,7 +365,7 @@ export function useMeetingMemory(ai: {
 
     if (!knowledgeConfigured || !graphMeetingIdRef.current) return;
 
-    await runCoachCycle(true);
+    await syncMeetingMemory();
 
     try {
 
@@ -498,10 +383,8 @@ export function useMeetingMemory(ai: {
 
     meetingUtterancesRef.current = [];
 
-    setCoachSuggestions([]);
-    setCoachStatus("");
-    setCoachLastError("");
-  }, [knowledgeConfigured, runCoachCycle]);
+    setMemorySyncError("");
+  }, [knowledgeConfigured, syncMeetingMemory]);
 
 
 
@@ -519,6 +402,108 @@ export function useMeetingMemory(ai: {
 
 
 
+  const setSybillApiKey = useCallback((key: string) => {
+    setSybillApiKeyState(key);
+    safeLocalStorage.setItem(SYBILL_API_KEY, key);
+  }, []);
+
+  const refreshKnownClients = useCallback(async () => {
+    const configured = await isKnowledgeConfigured();
+    setKnowledgeConfigured(configured);
+    if (!configured) {
+      setKnownClients([]);
+      return [];
+    }
+    const clients = await listKnownClients();
+    setKnownClients(clients);
+    return clients;
+  }, []);
+
+  const runSybillSync = useCallback(async () => {
+    if (sybillSyncing) return null;
+    const key = sybillApiKey.trim();
+    if (!key) {
+      setSybillStatus("Add your Sybill API key first.");
+      return null;
+    }
+
+    const configured = await isKnowledgeConfigured();
+    setKnowledgeConfigured(configured);
+    if (!configured) {
+      setSybillStatus(
+        "Neo4j not configured. Add NEO4J_* to src-tauri/.env and restart."
+      );
+      return null;
+    }
+
+    if (!ai.provider) {
+      setSybillStatus(
+        "Select an AI provider in Dev Space — needed to summarize meetings."
+      );
+      return null;
+    }
+
+    setSybillSyncing(true);
+    setSybillResult(null);
+    setSybillCard(null);
+    setSybillStatus("Connecting to Sybill…");
+    const abort = new AbortController();
+    sybillAbortRef.current = abort;
+
+    try {
+      const result = await syncSybillMeetings({
+        apiKey: key,
+        ai: { provider: ai.provider, selectedProvider: ai.selectedProvider },
+        signal: abort.signal,
+        onProgress: (progress) => {
+          setSybillCard(progress);
+          setSybillStatus(
+            `${progress.message} (${progress.imported} imported, ${progress.skipped} skipped)`
+          );
+        },
+      });
+
+      setSybillResult(result);
+      setSybillCard(null);
+      setSybillStatus(
+        `Done · ${result.imported} imported, ${result.skipped} already synced` +
+          (result.errors.length ? `, ${result.errors.length} errors` : "")
+      );
+      await refreshKnownClients();
+      await refreshClientContext();
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSybillStatus(`Sync failed: ${message}`);
+      return null;
+    } finally {
+      setSybillSyncing(false);
+      setSybillCard(null);
+      sybillAbortRef.current = null;
+    }
+  }, [
+    ai.provider,
+    ai.selectedProvider,
+    refreshClientContext,
+    refreshKnownClients,
+    sybillApiKey,
+    sybillSyncing,
+  ]);
+
+  const cancelSybillSync = useCallback(() => {
+    sybillAbortRef.current?.abort();
+  }, []);
+
+  const getMeetingTranscriptForAsk = useCallback(() => {
+    const live = liveTranscriptSnapshotRef.current.trim();
+    const utterances = meetingUtterancesRef.current.join("\n").trim();
+    return live || utterances;
+  }, []);
+
+  useEffect(() => {
+    void refreshKnownClients();
+  }, [refreshKnownClients]);
+
   return {
 
     clientName,
@@ -533,10 +518,8 @@ export function useMeetingMemory(ai: {
 
     clientContext,
 
-    coachSuggestions,
     isMemorySyncing,
-    coachStatus,
-    coachLastError,
+    memorySyncError,
     coachBlockedReason: !knowledgeConfigured
 
       ? ("neo4j" as const)
@@ -563,9 +546,21 @@ export function useMeetingMemory(ai: {
 
     appendUtterance,
 
-    runCoachCycle,
-
     endGraphMeeting,
+
+    getMeetingTranscriptForAsk,
+
+    // Sybill sync
+    sybillApiKey,
+    setSybillApiKey,
+    sybillSyncing,
+    sybillStatus,
+    sybillResult,
+    sybillCard,
+    knownClients,
+    refreshKnownClients,
+    runSybillSync,
+    cancelSybillSync,
 
   };
 

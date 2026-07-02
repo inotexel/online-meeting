@@ -307,6 +307,131 @@ fn string_list(value: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientSummary {
+    pub client_id: String,
+    pub client_name: String,
+    pub meeting_count: i64,
+}
+
+#[tauri::command]
+pub async fn knowledge_list_clients() -> Result<Vec<ClientSummary>, String> {
+    let neo = client()?;
+    let data = neo
+        .run(
+            r#"
+            MATCH (c:Client)
+            OPTIONAL MATCH (c)-[:HAS_MEETING]->(m:Meeting)
+            RETURN c.id AS clientId,
+                   coalesce(c.name, c.id) AS clientName,
+                   count(m) AS meetingCount
+            ORDER BY clientName
+            "#,
+            json!({}),
+        )
+        .await?;
+
+    let rows = data
+        .get("values")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    Ok(rows
+        .iter()
+        .filter_map(|row| row.as_array())
+        .map(|row| ClientSummary {
+            client_id: row.first().and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            client_name: row.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            meeting_count: row.get(2).and_then(|v| v.as_i64()).unwrap_or(0),
+        })
+        .filter(|c| !c.client_id.is_empty())
+        .collect())
+}
+
+fn sybill_meeting_node_id(sybill_id: &str) -> String {
+    format!("sybill_{sybill_id}")
+}
+
+#[tauri::command]
+pub async fn knowledge_sybill_meeting_exists(sybill_id: String) -> Result<bool, String> {
+    let neo = client()?;
+    let meeting_id = sybill_meeting_node_id(&sybill_id);
+    let data = neo
+        .run(
+            r#"
+            MATCH (m:Meeting {id: $meetingId})
+            RETURN count(m) AS total
+            "#,
+            json!({ "meetingId": meeting_id }),
+        )
+        .await?;
+
+    let total = data
+        .get("values")
+        .and_then(|v| v.as_array())
+        .and_then(|rows| rows.first())
+        .and_then(|row| row.as_array())
+        .and_then(|row| row.first())
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    Ok(total > 0)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSybillMeetingInput {
+    pub client_id: String,
+    pub client_name: String,
+    pub sybill_id: String,
+    pub title: Option<String>,
+    pub call_type: Option<String>,
+    pub meeting_date: Option<String>,
+    pub summary: Option<String>,
+}
+
+#[tauri::command]
+pub async fn knowledge_import_sybill_meeting(
+    input: ImportSybillMeetingInput,
+) -> Result<String, String> {
+    let neo = client()?;
+    neo.ensure_constraints().await?;
+
+    let meeting_id = sybill_meeting_node_id(&input.sybill_id);
+
+    neo.run(
+        r#"
+        MERGE (c:Client {id: $clientId})
+        SET c.name = $clientName, c.updated_at = datetime()
+        MERGE (m:Meeting {id: $meetingId})
+        SET m.source = 'sybill',
+            m.sybill_id = $sybillId,
+            m.title = $title,
+            m.call_type = $callType,
+            m.meeting_date = $meetingDate,
+            m.summary = coalesce($summary, m.summary),
+            m.status = 'completed',
+            m.started_at = coalesce(m.started_at, datetime())
+        MERGE (c)-[:HAS_MEETING]->(m)
+        "#,
+        json!({
+            "clientId": input.client_id,
+            "clientName": input.client_name,
+            "meetingId": meeting_id,
+            "sybillId": input.sybill_id,
+            "title": input.title,
+            "callType": input.call_type,
+            "meetingDate": input.meeting_date,
+            "summary": input.summary,
+        }),
+    )
+    .await?;
+
+    Ok(meeting_id)
+}
+
 #[tauri::command]
 pub async fn knowledge_ingest_document(
     app: tauri::AppHandle,
@@ -346,6 +471,7 @@ pub async fn knowledge_search_client_docs(
         &input.query,
         &input.openai_api_key,
         input.limit.unwrap_or(5) as usize,
+        input.min_score,
     )
     .await
 }

@@ -1,3 +1,12 @@
+/** True when the utterance should feed the prospect-only whisper coach. */
+export function isProspectUtterance(
+  speakerLabel: string | null | undefined
+): boolean {
+  if (!speakerLabel) return true;
+  const normalized = speakerLabel.trim().toLowerCase();
+  return normalized !== "user" && normalized !== "seller";
+}
+
 /** Format a transcript line with User/Client speaker labels for coach and memory. */
 export function formatDialogueLine(
   speakerLabel: string | null | undefined,

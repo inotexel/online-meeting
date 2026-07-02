@@ -15,6 +15,7 @@ interface ClientDocumentsProps {
   openaiApiKey?: string;
   knowledgeConfigured: boolean;
   disabled?: boolean;
+  embedded?: boolean;
 }
 
 export const ClientDocuments = ({
@@ -22,6 +23,7 @@ export const ClientDocuments = ({
   openaiApiKey,
   knowledgeConfigured,
   disabled = false,
+  embedded = false,
 }: ClientDocumentsProps) => {
   const [documents, setDocuments] = useState<ClientDocument[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -124,10 +126,89 @@ export const ClientDocuments = ({
 
   if (!knowledgeConfigured) return null;
 
+  const body = (
+    <>
+      {!trimmedName && (
+        <p className="text-xs text-muted-foreground">
+          Enter a client name to attach documents for live coach retrieval.
+        </p>
+      )}
+
+      {error && (
+        <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-md p-2">
+          {error}
+        </p>
+      )}
+
+      {isLoading && (
+        <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+          <LoaderIcon className="w-3 h-3 animate-spin" />
+          Loading documents…
+        </p>
+      )}
+
+      {!isLoading && trimmedName && documents.length === 0 && (
+        <p className="text-xs text-muted-foreground">
+          No documents yet. Upload PDF, TXT, or Markdown — chunks are stored in
+          Neo4j for live coaching.
+        </p>
+      )}
+
+      {documents.map((doc) => (
+        <div
+          key={doc.id}
+          className="flex items-start justify-between gap-2 rounded-md border border-border/40 bg-background/60 p-2"
+        >
+          <div className="min-w-0">
+            <p className="text-xs font-medium truncate">{doc.title}</p>
+            <p className="text-[10px] text-muted-foreground truncate">
+              {doc.filename} · {doc.chunkCount} chunks
+            </p>
+          </div>
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            className="h-6 w-6 shrink-0"
+            disabled={disabled}
+            onClick={() => void handleDelete(doc.id)}
+          >
+            <Trash2Icon className="w-3 h-3" />
+          </Button>
+        </div>
+      ))}
+    </>
+  );
+
+  if (embedded) {
+    return (
+      <div className="space-y-2">
+        <div className="flex justify-end">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-8 text-xs gap-1"
+            disabled={disabled || isUploading || !trimmedName}
+            onClick={() => void handleUpload()}
+          >
+            {isUploading ? (
+              <LoaderIcon className="w-3 h-3 animate-spin" />
+            ) : (
+              <UploadIcon className="w-3 h-3" />
+            )}
+            Upload cheat sheet
+          </Button>
+        </div>
+        {body}
+      </div>
+    );
+  }
+
   return (
     <div className="rounded-lg border border-border/50 bg-muted/30 overflow-hidden">
       <div className="flex items-center justify-between px-3 py-2 border-b border-border/40 gap-2">
-        <div className="flex items-center gap-1.5 text-[10px] font-medium">
+        <div className="flex items-center gap-1.5 text-xs font-medium">
           <FileTextIcon className="w-3.5 h-3.5" />
           Client documents (Neo4j RAG)
         </div>
@@ -135,7 +216,7 @@ export const ClientDocuments = ({
           type="button"
           size="sm"
           variant="outline"
-          className="h-7 text-[10px] gap-1"
+          className="h-7 text-xs gap-1"
           disabled={disabled || isUploading || !trimmedName}
           onClick={() => void handleUpload()}
         >
@@ -148,57 +229,7 @@ export const ClientDocuments = ({
         </Button>
       </div>
 
-      <div className="p-3 space-y-2">
-        {!trimmedName && (
-          <p className="text-[10px] text-muted-foreground">
-            Enter a client name to attach documents for live coach retrieval.
-          </p>
-        )}
-
-        {error && (
-          <p className="text-[10px] text-red-700 bg-red-50 border border-red-200 rounded-md p-2">
-            {error}
-          </p>
-        )}
-
-        {isLoading && (
-          <p className="text-[10px] text-muted-foreground flex items-center gap-1.5">
-            <LoaderIcon className="w-3 h-3 animate-spin" />
-            Loading documents…
-          </p>
-        )}
-
-        {!isLoading && trimmedName && documents.length === 0 && (
-          <p className="text-[10px] text-muted-foreground">
-            No documents yet. Upload PDF, TXT, or Markdown — chunks and vectors
-            are stored in Neo4j Aura for live coach.
-          </p>
-        )}
-
-        {documents.map((doc) => (
-          <div
-            key={doc.id}
-            className="flex items-start justify-between gap-2 rounded-md border border-border/40 bg-background/60 p-2"
-          >
-            <div className="min-w-0">
-              <p className="text-xs font-medium truncate">{doc.title}</p>
-              <p className="text-[9px] text-muted-foreground truncate">
-                {doc.filename} · {doc.chunkCount} chunks
-              </p>
-            </div>
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              className="h-6 w-6 shrink-0"
-              disabled={disabled}
-              onClick={() => void handleDelete(doc.id)}
-            >
-              <Trash2Icon className="w-3 h-3" />
-            </Button>
-          </div>
-        ))}
-      </div>
+      <div className="p-3 space-y-2">{body}</div>
     </div>
   );
 };

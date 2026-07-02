@@ -1,18 +1,24 @@
-import { useCompletion } from "@/hooks";
+import { useCompletion, type MeetingAskBridge } from "@/hooks";
 import { Screenshot } from "./Screenshot";
 import { Files } from "./Files";
-import { Audio } from "./Audio";
 import { Input } from "./Input";
 
-export const Completion = ({ isHidden }: { isHidden: boolean }) => {
-  const completion = useCompletion();
+export const Completion = ({
+  isHidden,
+  meetingAsk,
+  embedded = false,
+}: {
+  isHidden: boolean;
+  meetingAsk?: MeetingAskBridge;
+  embedded?: boolean;
+}) => {
+  const completion = useCompletion({ meetingAsk, embedded });
 
   return (
     <>
-      <Audio {...completion} />
-      <Input {...completion} isHidden={isHidden} />
-      <Screenshot {...completion} />
-      <Files {...completion} />
+      <Input {...completion} isHidden={isHidden} embedded={embedded} />
+      {!embedded && <Screenshot {...completion} />}
+      {!embedded && <Files {...completion} />}
     </>
   );
 };

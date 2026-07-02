@@ -161,7 +161,7 @@ export const LiveTranscript = ({
 
         className={cn(
 
-          "text-xs leading-relaxed",
+          "text-base leading-relaxed",
 
           italic ? "text-muted-foreground italic" : "text-foreground"
 
@@ -209,7 +209,7 @@ export const LiveTranscript = ({
 
           />
 
-          <span className="text-xs font-medium truncate">{title}</span>
+          <span className="text-sm font-medium truncate">{title}</span>
 
         </div>
 
@@ -259,11 +259,11 @@ export const LiveTranscript = ({
 
       {displayMode === "caption" ? (
 
-        <div className="min-h-[3.25rem] p-3 flex items-center">
+        <div className="min-h-[4rem] p-3 flex items-center">
 
           {!hasContent ? (
 
-            <p className="text-[10px] text-muted-foreground text-center w-full py-1">
+            <p className="text-sm text-muted-foreground text-center w-full py-1">
 
               {emptyMessage ??
 
@@ -295,7 +295,7 @@ export const LiveTranscript = ({
 
             {!hasContent && (
 
-              <p className="text-[10px] text-muted-foreground text-center py-4">
+              <p className="text-sm text-muted-foreground text-center py-4">
 
                 {emptyMessage ??
 

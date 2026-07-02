@@ -144,6 +144,59 @@ export async function getClientGraphContext(
   }
 }
 
+export interface KnownClient {
+  clientId: string;
+  clientName: string;
+  meetingCount: number;
+}
+
+export async function listKnownClients(): Promise<KnownClient[]> {
+  try {
+    const result = await invoke<
+      { client_id: string; client_name: string; meeting_count: number }[]
+    >("knowledge_list_clients");
+    return (result ?? []).map((row) => ({
+      clientId: row.client_id,
+      clientName: row.client_name,
+      meetingCount: row.meeting_count ?? 0,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export async function sybillMeetingExists(sybillId: string): Promise<boolean> {
+  try {
+    return await invoke<boolean>("knowledge_sybill_meeting_exists", {
+      sybillId,
+    });
+  } catch {
+    return false;
+  }
+}
+
+export async function importSybillMeeting(params: {
+  clientId: string;
+  clientName: string;
+  sybillId: string;
+  title?: string | null;
+  callType?: string | null;
+  meetingDate?: string | null;
+  summary?: string | null;
+}): Promise<string> {
+  return invoke<string>("knowledge_import_sybill_meeting", {
+    input: {
+      clientId: params.clientId,
+      clientName: params.clientName,
+      sybillId: params.sybillId,
+      title: params.title ?? null,
+      callType: params.callType ?? null,
+      meetingDate: params.meetingDate ?? null,
+      summary: params.summary ?? null,
+    },
+  });
+}
+
 export function slugifyClientId(name: string): string {
   const slug = name
     .trim()

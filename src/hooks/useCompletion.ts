@@ -17,6 +17,7 @@ import {
 } from "@/lib";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { MeetingAskBridge } from "./useSystemAudio";
 
 // Types for completion
 interface AttachedFile {
@@ -52,7 +53,10 @@ interface CompletionState {
   conversationHistory: ChatMessage[];
 }
 
-export const useCompletion = () => {
+export const useCompletion = (options?: {
+  meetingAsk?: MeetingAskBridge;
+  embedded?: boolean;
+}) => {
   const {
     selectedAIProvider,
     allAiProviders,
@@ -179,6 +183,10 @@ export const useCompletion = () => {
 
         let fullResponse = "";
 
+        const useMeetingAsk =
+          options?.meetingAsk?.active === true &&
+          state.attachedFiles.length === 0;
+
         const usePluelyAPI = await shouldUsePluelyAPI();
         // Check if AI provider is configured
         if (!selectedAIProvider.provider && !usePluelyAPI) {
@@ -209,31 +217,41 @@ export const useCompletion = () => {
         }));
 
         try {
-          // Use the fetchAIResponse function with signal
-          for await (const chunk of fetchAIResponse({
-            provider: usePluelyAPI ? undefined : provider,
-            selectedProvider: selectedAIProvider,
-            systemPrompt: systemPrompt || undefined,
-            history: messageHistory,
-            userMessage: input,
-            imagesBase64,
-            signal,
-          })) {
-            // Only update if this is still the current request
-            if (currentRequestIdRef.current !== requestId) {
-              return; // Request was superseded, stop processing
+          if (useMeetingAsk && options?.meetingAsk) {
+            for await (const chunk of options.meetingAsk.streamAsk(
+              input,
+              signal
+            )) {
+              if (currentRequestIdRef.current !== requestId) return;
+              if (signal.aborted) return;
+              fullResponse += chunk;
+              setState((prev) => ({
+                ...prev,
+                response: prev.response + chunk,
+              }));
             }
-
-            // Check if request was aborted
-            if (signal.aborted) {
-              return; // Request was cancelled, stop processing
+          } else {
+            for await (const chunk of fetchAIResponse({
+              provider: usePluelyAPI ? undefined : provider,
+              selectedProvider: selectedAIProvider,
+              systemPrompt: systemPrompt || undefined,
+              history: messageHistory,
+              userMessage: input,
+              imagesBase64,
+              signal,
+            })) {
+              if (currentRequestIdRef.current !== requestId) {
+                return;
+              }
+              if (signal.aborted) {
+                return;
+              }
+              fullResponse += chunk;
+              setState((prev) => ({
+                ...prev,
+                response: prev.response + chunk,
+              }));
             }
-
-            fullResponse += chunk;
-            setState((prev) => ({
-              ...prev,
-              response: prev.response + chunk,
-            }));
           }
         } catch (e: any) {
           // Only show error if this is still the current request and not aborted
@@ -291,6 +309,7 @@ export const useCompletion = () => {
       allAiProviders,
       systemPrompt,
       state.conversationHistory,
+      options?.meetingAsk,
     ]
   );
 
@@ -759,10 +778,11 @@ export const useCompletion = () => {
   );
 
   const isPopoverOpen =
-    state.isLoading ||
-    state.response !== "" ||
-    state.error !== null ||
-    keepEngaged;
+    !options?.embedded &&
+    (state.isLoading ||
+      state.response !== "" ||
+      state.error !== null ||
+      keepEngaged);
 
   useEffect(() => {
     resizeWindow(
@@ -1046,5 +1066,6 @@ export const useCompletion = () => {
     isScreenshotLoading,
     keepEngaged,
     setKeepEngaged,
+    meetingAskActive: options?.meetingAsk?.active === true,
   };
 };

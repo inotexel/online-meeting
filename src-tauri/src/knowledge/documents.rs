@@ -28,6 +28,7 @@ pub struct SearchClientDocsInput {
     pub query: String,
     pub openai_api_key: String,
     pub limit: Option<i64>,
+    pub min_score: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -299,6 +300,7 @@ pub async fn search_client_documents(
     query: &str,
     openai_api_key: &str,
     limit: usize,
+    min_score: Option<f64>,
 ) -> Result<Vec<DocChunkHit>, String> {
     let trimmed = query.trim();
     if trimmed.is_empty() {
@@ -310,7 +312,7 @@ pub async fn search_client_documents(
 
     let query_vector = embed_query(openai_api_key, trimmed).await?;
     let top_k = (limit * 4).max(12);
-    let min_score = 0.75_f64;
+    let min_score = min_score.unwrap_or(0.75_f64);
 
     let data = neo
         .run(
