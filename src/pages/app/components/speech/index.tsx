@@ -4,7 +4,6 @@ import {
   Popover,
   PopoverTrigger,
   PopoverContent,
-  ScrollArea,
 } from "@/components";
 import {
   HeadphonesIcon,
@@ -23,8 +22,10 @@ import { SettingsPanel } from "./SettingsPanel";
 import { PermissionFlow } from "./PermissionFlow";
 import { QuickActions } from "./QuickActions";
 import { Warning } from "./Warning";
-import { LiveTranscript } from "./LiveTranscript";
-import { useSystemAudioType, getCaptureMode } from "@/hooks";
+import { MeetingCoachLayout } from "./MeetingCoachLayout";
+import { OverlaySizeToggle } from "./OverlaySizeToggle";
+import { OverlayAskSection } from "./OverlayAskSection";
+import { useSystemAudioType, getCaptureMode, useGoogleCalendar } from "@/hooks";
 import { useApp } from "@/contexts";
 import { cn } from "@/lib/utils";
 
@@ -48,6 +49,8 @@ export const SystemAudio = (props: useSystemAudioType) => {
     startNewConversation,
     conversation,
     resizeWindow,
+    overlaySizeMode,
+    applyOverlaySizeMode,
     quickActions,
     addQuickAction,
     removeQuickAction,
@@ -68,6 +71,35 @@ export const SystemAudio = (props: useSystemAudioType) => {
     isRealtimeSessionActive,
     realtimeSegments,
     realtimePendingDelta,
+    realtimePendingSpeakerLabel,
+    meetingClientName,
+    setMeetingClientName,
+    openaiApiKey,
+    knowledgeConfigured,
+    knowledgeStatus,
+    clientGraphContext,
+    isMemorySyncing,
+    memorySyncError,
+    coachBlockedReason,
+    testKnowledgeConnection,
+    sybillApiKey,
+    setSybillApiKey,
+    sybillSyncing,
+    sybillStatus,
+    sybillResult,
+    sybillCard,
+    knownClients,
+    runSybillSync,
+    cancelSybillSync,
+    vadWhisper,
+    vadWhisperLastProspectLine,
+    vadWhisperCoachStatus,
+    vadWhisperCoachLastError,
+    vadWhisperCoachBlockedReason,
+    vadWhisperIsThinking,
+    vadWhisperMeetingStage,
+    meetingAskActive,
+    streamMeetingAskQuestion,
   } = props;
 
   const { hasActiveLicense, supportsImages } = useApp();
@@ -81,7 +113,16 @@ export const SystemAudio = (props: useSystemAudioType) => {
 
   const captureMode = getCaptureMode(vadConfig);
   const isVadMode = captureMode === "vad";
-  const hasResponse = !isRealtimeMode && (lastAIResponse || isAIProcessing);
+  const hasResponse =
+    !isRealtimeMode && !isVadMode && (lastAIResponse || isAIProcessing);
+
+  const googleCalendar = useGoogleCalendar(
+    (captureMode === "realtime" || captureMode === "vad") && knowledgeConfigured
+  );
+
+  const isMeetingCoachMode = captureMode === "realtime" || captureMode === "vad";
+  const whisperBlockedReason =
+    vadWhisperCoachBlockedReason ?? coachBlockedReason ?? undefined;
 
   // Keyboard shortcut for Cmd+K to toggle view mode
   useEffect(() => {
@@ -185,6 +226,24 @@ export const SystemAudio = (props: useSystemAudioType) => {
     return "Open system audio panel";
   };
 
+  const expandedOriginalHeight = isMeetingCoachMode
+    ? capturing
+      ? 720
+      : 500
+    : capturing
+      ? 600
+      : 480;
+
+  const meetingAsk = {
+    active: Boolean(meetingAskActive),
+    streamAsk: streamMeetingAskQuestion,
+  };
+
+  useEffect(() => {
+    if (!isPopoverOpen) return;
+    void resizeWindow(true, { originalHeight: expandedOriginalHeight });
+  }, [capturing, expandedOriginalHeight, isPopoverOpen, resizeWindow]);
+
   return (
     <Popover
       open={isPopoverOpen}
@@ -193,7 +252,9 @@ export const SystemAudio = (props: useSystemAudioType) => {
           return;
         }
         setIsPopoverOpen(open);
-        resizeWindow(open);
+        void resizeWindow(open, {
+          originalHeight: expandedOriginalHeight,
+        });
       }}
     >
       <PopoverTrigger asChild>
@@ -213,12 +274,18 @@ export const SystemAudio = (props: useSystemAudioType) => {
       <PopoverContent
         align="end"
         side="bottom"
-        className="select-none w-screen p-0 border shadow-lg overflow-hidden border-input/50"
+        className="w-screen overflow-hidden border border-input/50 p-0 shadow-lg"
         sideOffset={8}
       >
-          <div className="flex flex-col h-[calc(100vh-4rem)] overflow-hidden">
+          <div
+            className="flex flex-col overflow-hidden"
+            style={{
+              height: expandedOriginalHeight,
+              maxHeight: "calc(100vh - 2.5rem)",
+            }}
+          >
             {/* Header - Mode Switcher + Actions */}
-            <div className="flex-shrink-0 p-3 border-b border-border/50">
+            <div className="flex-shrink-0 select-none border-b border-border/50 p-3">
               <div className="flex items-center justify-between gap-2">
                 {/* Mode Switcher */}
                 {!setupRequired && (
@@ -239,6 +306,13 @@ export const SystemAudio = (props: useSystemAudioType) => {
 
                 {/* Action Buttons */}
                 <div className="flex items-center gap-1.5 flex-shrink-0">
+                  <OverlaySizeToggle
+                    value={overlaySizeMode}
+                    onChange={(mode) =>
+                      void applyOverlaySizeMode(mode, expandedOriginalHeight)
+                    }
+                  />
+
                   {!setupRequired && !capturing && (
                     <Button
                       size="sm"
@@ -264,8 +338,11 @@ export const SystemAudio = (props: useSystemAudioType) => {
                     </Button>
                   )}
 
-                  {/* Screenshot Button */}
-                  {hasActiveLicense && !setupRequired && supportsImages && !isRealtimeMode && (
+                  {/* Screenshot — manual mode only */}
+                  {hasActiveLicense &&
+                    !setupRequired &&
+                    supportsImages &&
+                    captureMode === "continuous" && (
                     <Button
                       size="sm"
                       variant={screenshotImage ? "default" : "outline"}
@@ -286,8 +363,8 @@ export const SystemAudio = (props: useSystemAudioType) => {
                     </Button>
                   )}
 
-                  {/* New Conversation Button */}
-                  {!setupRequired && (
+                  {/* New conversation — manual AI chat only */}
+                  {!setupRequired && captureMode === "continuous" && (
                     <Button
                       size="sm"
                       variant="ghost"
@@ -319,8 +396,19 @@ export const SystemAudio = (props: useSystemAudioType) => {
               </div>
             </div>
 
-            <ScrollArea className="flex-1 min-h-0" ref={scrollAreaRef}>
-              <div className="p-2 space-y-2">
+            {/* Ask — pinned below header so it's always visible */}
+            {!setupRequired && (
+              <div className="flex-shrink-0 border-b border-border/50 px-3 py-2.5">
+                <OverlayAskSection meetingAsk={meetingAsk} />
+              </div>
+            )}
+
+            <div
+              ref={scrollAreaRef}
+              data-slot="scroll-area-viewport"
+              className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+            >
+              <div className="space-y-2 p-3">
                 {/* Screenshot Preview */}
                 {screenshotImage && (
                   <div className="flex items-center gap-2 p-2 rounded-lg bg-primary/5 border border-primary/20">
@@ -374,9 +462,9 @@ export const SystemAudio = (props: useSystemAudioType) => {
                 ) : (
                   <>
                     {/* Recording Panel (manual mode only) */}
-                    {!isRealtimeMode && (
+                    {captureMode === "continuous" && (
                       <RecordingPanel
-                        isVadMode={isVadMode}
+                        isVadMode={false}
                         isRecording={isRecordingInContinuousMode}
                         isProcessing={isProcessing}
                         isAIProcessing={isAIProcessing}
@@ -388,20 +476,61 @@ export const SystemAudio = (props: useSystemAudioType) => {
                       />
                     )}
 
-                    {/* Live transcript (realtime mode) */}
-                    {captureMode === "realtime" && (
-                      <div className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm pb-2">
-                        <LiveTranscript
-                          segments={realtimeSegments}
-                          pendingDelta={realtimePendingDelta}
-                          isSessionActive={isRealtimeSessionActive}
-                          isCapturing={capturing}
-                        />
-                      </div>
+                    {isMeetingCoachMode && (
+                      <MeetingCoachLayout
+                        captureMode={captureMode as "vad" | "realtime"}
+                        capturing={capturing}
+                        vadConfig={vadConfig}
+                        onUpdateVadConfig={updateVadConfiguration}
+                        isRealtimeSessionActive={isRealtimeSessionActive}
+                        realtimeSegments={realtimeSegments}
+                        realtimePendingDelta={realtimePendingDelta}
+                        realtimePendingSpeakerLabel={realtimePendingSpeakerLabel}
+                        whisper={vadWhisper}
+                        lastProspectLine={vadWhisperLastProspectLine}
+                        meetingStage={vadWhisperMeetingStage}
+                        isThinking={vadWhisperIsThinking}
+                        isMemorySyncing={isMemorySyncing}
+                        whisperBlockedReason={whisperBlockedReason}
+                        whisperStatus={vadWhisperCoachStatus}
+                        whisperError={
+                          vadWhisperCoachLastError || memorySyncError
+                        }
+                        meetingClientName={meetingClientName}
+                        onClientNameChange={setMeetingClientName}
+                        knowledgeConfigured={knowledgeConfigured}
+                        knowledgeStatus={knowledgeStatus}
+                        clientGraphContext={clientGraphContext}
+                        knownClients={knownClients}
+                        onTestConnection={testKnowledgeConnection}
+                        openaiApiKey={openaiApiKey}
+                        sybillApiKey={sybillApiKey}
+                        onSybillApiKeyChange={setSybillApiKey}
+                        sybillSyncing={sybillSyncing}
+                        sybillStatus={sybillStatus}
+                        sybillResult={sybillResult}
+                        sybillCard={sybillCard}
+                        onSybillSync={runSybillSync}
+                        onSybillCancel={cancelSybillSync}
+                        calendarConfigured={googleCalendar.configured}
+                        calendarConnected={googleCalendar.connected}
+                        calendarMeetings={googleCalendar.meetings}
+                        calendarLoading={googleCalendar.loading}
+                        calendarConnecting={googleCalendar.connecting}
+                        calendarError={googleCalendar.error}
+                        onCalendarConnect={() => void googleCalendar.connect()}
+                        onCalendarDisconnect={() =>
+                          void googleCalendar.disconnect()
+                        }
+                        onCalendarRefresh={() =>
+                          void googleCalendar.refreshMeetings()
+                        }
+                        onSelectCalendarMeeting={setMeetingClientName}
+                      />
                     )}
 
-                    {/* AI Response (not shown in realtime mode) */}
-                    {!isRealtimeMode && (
+                    {/* AI Response (manual mode only) */}
+                    {!isRealtimeMode && !isVadMode && (
                       <ResultsSection
                         lastTranscription={lastTranscription}
                         lastAIResponse={lastAIResponse}
@@ -412,23 +541,24 @@ export const SystemAudio = (props: useSystemAudioType) => {
                       />
                     )}
 
-                    {/* Settings Panel */}
-                    <SettingsPanel
-                      vadConfig={vadConfig}
-                      onUpdateVadConfig={updateVadConfiguration}
-                      useSystemPrompt={useSystemPrompt}
-                      setUseSystemPrompt={setUseSystemPrompt}
-                      contextContent={contextContent}
-                      setContextContent={setContextContent}
-                      captureMode={captureMode}
-                    />
-
-                    {/* Help/Keyboard Shortcuts */}
-                    <Warning captureMode={captureMode} />
+                    {captureMode === "continuous" && (
+                      <>
+                        <SettingsPanel
+                          vadConfig={vadConfig}
+                          onUpdateVadConfig={updateVadConfiguration}
+                          useSystemPrompt={useSystemPrompt}
+                          setUseSystemPrompt={setUseSystemPrompt}
+                          contextContent={contextContent}
+                          setContextContent={setContextContent}
+                          captureMode={captureMode}
+                        />
+                        <Warning captureMode={captureMode} />
+                      </>
+                    )}
                   </>
                 )}
               </div>
-            </ScrollArea>
+            </div>
 
             {/* Quick Actions */}
             {!setupRequired && hasResponse && (
@@ -445,6 +575,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
                 />
               </div>
             )}
+
           </div>
         </PopoverContent>
     </Popover>

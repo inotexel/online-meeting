@@ -111,7 +111,10 @@ export interface UseCompletionReturn {
   /** Ref for the scroll area container (for auto-scrolling) */
   scrollAreaRef: RefObject<HTMLDivElement | null>;
   /** Function to resize the application window based on UI state */
-  resizeWindow: (expanded: boolean) => Promise<void>;
+  resizeWindow: (
+    expanded: boolean,
+    heightOrOptions?: number | import("@/lib/overlay-size").ResizeWindowOptions
+  ) => Promise<void>;
 
   // Files popover management
   /** Whether the files attachment popover is open */
@@ -127,6 +130,8 @@ export interface UseCompletionReturn {
   captureScreenshot: () => Promise<void>;
   /** Whether a screenshot is currently loading */
   isScreenshotLoading: boolean;
+  /** True during live meeting capture — routes ask to meeting brain */
+  meetingAskActive?: boolean;
 }
 
 /**

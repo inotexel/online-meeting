@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import { AudioWaveformIcon, MicIcon, RadioIcon } from "lucide-react";
+import { AudioWaveformIcon, RadioIcon } from "lucide-react";
 import { CaptureMode } from "@/hooks/useSystemAudio";
 
 interface ModeSwitcherProps {
@@ -8,36 +8,32 @@ interface ModeSwitcherProps {
   disabled?: boolean;
 }
 
+const MODES: {
+  id: CaptureMode;
+  icon: typeof AudioWaveformIcon;
+  label: string;
+  description: string;
+}[] = [
+  {
+    id: "vad",
+    icon: AudioWaveformIcon,
+    label: "Auto-detect",
+    description: "Chunk on silence",
+  },
+  {
+    id: "realtime",
+    icon: RadioIcon,
+    label: "Realtime",
+    description: "Live transcript",
+  },
+];
+
 export const ModeSwitcher = ({
   captureMode,
   onModeChange,
   disabled = false,
 }: ModeSwitcherProps) => {
-  const modes: {
-    id: CaptureMode;
-    icon: typeof AudioWaveformIcon;
-    label: string;
-    description: string;
-  }[] = [
-    {
-      id: "vad",
-      icon: AudioWaveformIcon,
-      label: "Auto-detect",
-      description: "(voice activity)",
-    },
-    {
-      id: "continuous",
-      icon: MicIcon,
-      label: "Manual",
-      description: "(press to record)",
-    },
-    {
-      id: "realtime",
-      icon: RadioIcon,
-      label: "Realtime",
-      description: "(live transcript)",
-    },
-  ];
+  const activeMode = captureMode === "continuous" ? "vad" : captureMode;
 
   return (
     <div
@@ -46,15 +42,14 @@ export const ModeSwitcher = ({
         disabled && "opacity-50 pointer-events-none"
       )}
     >
-      {modes.map(({ id, icon: Icon, label, description }) => (
-        <button
+      {MODES.map(({ id, icon: Icon, label, description }) => (        <button
           key={id}
           type="button"
           onClick={() => onModeChange(id)}
           disabled={disabled}
           className={cn(
             "flex-1 flex items-center justify-center gap-1.5 px-1.5 py-1.5 rounded-md transition-all min-w-0",
-            captureMode === id
+            activeMode === id
               ? "bg-background shadow-sm text-foreground"
               : "text-muted-foreground hover:text-foreground"
           )}

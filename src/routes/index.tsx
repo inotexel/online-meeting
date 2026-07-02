@@ -11,6 +11,8 @@ import {
   Screenshot,
   Chats,
   Responses,
+  Transcripts,
+  ViewTranscript,
 } from "@/pages";
 import { DashboardLayout } from "@/layouts";
 
@@ -22,6 +24,8 @@ export default function AppRoutes() {
         <Route element={<DashboardLayout />}>
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/chats" element={<Chats />} />
+          <Route path="/transcripts" element={<Transcripts />} />
+          <Route path="/transcripts/view/:sessionId" element={<ViewTranscript />} />
           <Route path="/system-prompts" element={<SystemPrompts />} />
           <Route path="/chats/view/:conversationId" element={<ViewChat />} />
           <Route path="/shortcuts" element={<Shortcuts />} />

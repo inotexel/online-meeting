@@ -3,7 +3,10 @@ mod activate;
 mod api;
 mod capture;
 mod db;
+mod knowledge;
+mod calendar;
 mod shortcuts;
+mod sybill;
 mod window;
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
@@ -33,6 +36,8 @@ fn get_app_version() -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    knowledge::load_runtime_env();
+
     // Get PostHog API key
     let posthog_api_key = option_env!("POSTHOG_API_KEY").unwrap_or("").to_string();
     let builder = tauri::Builder::default()
@@ -49,6 +54,7 @@ pub fn run() {
         .manage(shortcuts::RegisteredShortcuts::default())
         .manage(shortcuts::LicenseState::default())
         .manage(shortcuts::MoveWindowState::default())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_http::init())
@@ -76,6 +82,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_app_version,
             window::set_window_height,
+            window::set_overlay_layout,
             window::set_overlay_content_protected,
             window::open_dashboard,
             window::toggle_dashboard,
@@ -118,6 +125,29 @@ pub fn run() {
             speaker::get_audio_sample_rate,
             speaker::get_input_devices,
             speaker::get_output_devices,
+            knowledge::knowledge_is_configured,
+            knowledge::knowledge_test_connection,
+            knowledge::knowledge_start_meeting_graph,
+            knowledge::knowledge_end_meeting_graph,
+            knowledge::knowledge_append_utterance,
+            knowledge::knowledge_apply_memory,
+            knowledge::knowledge_get_client_context,
+            knowledge::knowledge_list_clients,
+            knowledge::knowledge_sybill_meeting_exists,
+            knowledge::knowledge_import_sybill_meeting,
+            knowledge::knowledge_ingest_document,
+            knowledge::knowledge_list_documents,
+            knowledge::knowledge_delete_document,
+            knowledge::knowledge_search_client_docs,
+            sybill::sybill_health_check,
+            sybill::sybill_list_conversations,
+            sybill::sybill_get_conversation,
+            calendar::calendar_is_configured,
+            calendar::calendar_get_status,
+            calendar::calendar_connect,
+            calendar::calendar_disconnect,
+            calendar::calendar_fetch_upcoming,
+            calendar::calendar_redirect_uri,
         ])
         .setup(|app| {
             // Setup main window positioning

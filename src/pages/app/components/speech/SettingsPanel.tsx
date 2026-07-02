@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Button,
   Label,
@@ -26,6 +26,9 @@ import {
   getPromptTemplateById,
 } from "@/lib/platform-instructions";
 import { cn } from "@/lib/utils";
+
+/** Re-enable when AssemblyAI speaker diarization settings should appear. */
+const SHOW_SPEAKER_IDENTIFICATION = false;
 
 // Sensitivity presets for simpler UX
 const SENSITIVITY_PRESETS = {
@@ -61,6 +64,7 @@ interface SettingsPanelProps {
   contextContent: string;
   setContextContent: (content: string) => void;
   captureMode: CaptureMode;
+  embedded?: boolean;
 }
 
 export const SettingsPanel = ({
@@ -71,10 +75,23 @@ export const SettingsPanel = ({
   contextContent,
   setContextContent,
   captureMode,
+  embedded = false,
 }: SettingsPanelProps) => {
-  const [isOpen, setIsOpen] = useState(false);
+  const isVadMode = captureMode === "vad";
+  const isContinuousMode = captureMode === "continuous";
+  const isRealtimeMode = captureMode === "realtime";
+
+  const [isOpen, setIsOpen] = useState(isRealtimeMode || embedded);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [selectedTemplate, setSelectedTemplate] = useState<string>("");
+
+  useEffect(() => {
+    if (isRealtimeMode || embedded) {
+      setIsOpen(true);
+    }
+  }, [isRealtimeMode, embedded]);
+
+  const showAiContext = !embedded && !isRealtimeMode && !isVadMode;
 
   // Determine current sensitivity preset based on values
   const getCurrentPreset = (): SensitivityPreset | "custom" => {
@@ -123,37 +140,16 @@ export const SettingsPanel = ({
       max_recording_duration_secs: 180,
       realtime_model: "gpt-realtime-whisper",
       realtime_language: "en",
+      realtime_speaker_labels: false,
+      realtime_max_speakers: 5,
+      realtime_assemblyai_model: "universal-streaming-english",
+      assemblyai_api_key: "",
     };
     onUpdateVadConfig(defaultConfig);
   };
 
-  const isVadMode = captureMode === "vad";
-  const isContinuousMode = captureMode === "continuous";
-  const isRealtimeMode = captureMode === "realtime";
-
-  return (
-    <div className="rounded-lg border border-border/50 bg-muted/30 overflow-hidden">
-      {/* Settings Header - Always visible */}
-      <button
-        type="button"
-        onClick={() => setIsOpen(!isOpen)}
-        className="w-full flex items-center justify-between p-3 hover:bg-muted/50 transition-colors"
-      >
-        <div className="flex items-center gap-2">
-          <SettingsIcon className="w-3.5 h-3.5 text-muted-foreground" />
-          <span className="text-xs font-medium">Settings</span>
-        </div>
-        <ChevronDownIcon
-          className={cn(
-            "w-4 h-4 text-muted-foreground transition-transform",
-            isOpen && "rotate-180"
-          )}
-        />
-      </button>
-
-      {/* Settings Content */}
-      {isOpen && (
-        <div className="px-3 pb-3 space-y-4">
+  const settingsBody = (
+    <div className={embedded ? "space-y-4" : "px-3 pb-3 space-y-4"}>
           {/* Recording Settings Section */}
           <div className="space-y-3">
             <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
@@ -225,46 +221,137 @@ export const SettingsPanel = ({
             {/* Realtime transcription settings */}
             {isRealtimeMode && (
               <div className="space-y-3">
-                <div className="space-y-2">
-                  <Label className="text-xs font-medium">Transcription Model</Label>
-                  <input
-                    type="text"
-                    className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
-                    value={vadConfig.realtime_model || "gpt-realtime-whisper"}
-                    onChange={(e) =>
-                      onUpdateVadConfig({
-                        ...vadConfig,
-                        realtime_model: e.target.value,
-                      })
-                    }
-                    placeholder="gpt-realtime-whisper"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label className="text-xs font-medium">Language</Label>
-                  <input
-                    type="text"
-                    className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
-                    value={vadConfig.realtime_language || "en"}
-                    onChange={(e) =>
-                      onUpdateVadConfig({
-                        ...vadConfig,
-                        realtime_language: e.target.value,
-                      })
-                    }
-                    placeholder="en"
-                  />
-                </div>
-                <p className="text-[10px] text-muted-foreground">
-                  Uses your OpenAI API key from Dev Space → STT provider.
-                  Transcripts are saved locally; no AI responses in this mode.
-                </p>
+                {SHOW_SPEAKER_IDENTIFICATION && (
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex-1">
+                      <Label className="text-xs font-medium">
+                        Speaker identification
+                      </Label>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">
+                        Label who is speaking using AssemblyAI realtime diarization.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={Boolean(vadConfig.realtime_speaker_labels)}
+                      onCheckedChange={(checked) =>
+                        onUpdateVadConfig({
+                          ...vadConfig,
+                          realtime_speaker_labels: checked,
+                        })
+                      }
+                    />
+                  </div>
+                )}
+
+                {SHOW_SPEAKER_IDENTIFICATION && vadConfig.realtime_speaker_labels ? (
+                  <>
+                    <div className="space-y-2">
+                      <Label className="text-xs font-medium">
+                        AssemblyAI API key
+                      </Label>
+                      <input
+                        type="password"
+                        className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
+                        value={vadConfig.assemblyai_api_key || ""}
+                        onChange={(e) =>
+                          onUpdateVadConfig({
+                            ...vadConfig,
+                            assemblyai_api_key: e.target.value,
+                          })
+                        }
+                        placeholder="Your AssemblyAI API key"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-xs font-medium">
+                        AssemblyAI speech model
+                      </Label>
+                      <input
+                        type="text"
+                        className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
+                        value={
+                          vadConfig.realtime_assemblyai_model ||
+                          "universal-streaming-english"
+                        }
+                        onChange={(e) =>
+                          onUpdateVadConfig({
+                            ...vadConfig,
+                            realtime_assemblyai_model: e.target.value,
+                          })
+                        }
+                        placeholder="universal-streaming-english"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-xs font-medium flex items-center justify-between">
+                        <span>Max speakers (hint)</span>
+                        <span className="text-muted-foreground font-normal">
+                          {vadConfig.realtime_max_speakers || 5}
+                        </span>
+                      </Label>
+                      <Slider
+                        value={[vadConfig.realtime_max_speakers || 5]}
+                        onValueChange={([value]) =>
+                          onUpdateVadConfig({
+                            ...vadConfig,
+                            realtime_max_speakers: Math.round(value),
+                          })
+                        }
+                        min={2}
+                        max={10}
+                        step={1}
+                        className="w-full"
+                      />
+                    </div>
+                    <p className="text-[10px] text-muted-foreground">
+                      Uses AssemblyAI streaming with speaker labels. Transcripts
+                      are saved locally; no AI responses in this mode.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <div className="space-y-2">
+                      <Label className="text-xs font-medium">Transcription Model</Label>
+                      <input
+                        type="text"
+                        className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
+                        value={vadConfig.realtime_model || "gpt-realtime-whisper"}
+                        onChange={(e) =>
+                          onUpdateVadConfig({
+                            ...vadConfig,
+                            realtime_model: e.target.value,
+                          })
+                        }
+                        placeholder="gpt-realtime-whisper"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-xs font-medium">Language</Label>
+                      <input
+                        type="text"
+                        className="flex h-8 w-full rounded-md border border-input bg-background px-2 text-xs"
+                        value={vadConfig.realtime_language || "en"}
+                        onChange={(e) =>
+                          onUpdateVadConfig({
+                            ...vadConfig,
+                            realtime_language: e.target.value,
+                          })
+                        }
+                        placeholder="en"
+                      />
+                    </div>
+                    <p className="text-[10px] text-muted-foreground">
+                      Uses your OpenAI API key from Dev Space → STT provider.
+                      Transcripts are saved locally; no AI responses in this mode.
+                    </p>
+                  </>
+                )}
               </div>
             )}
           </div>
 
-          {/* Context Section - hidden in realtime mode */}
-          {!isRealtimeMode && (
+          {/* Context Section — manual mode only */}
+          {showAiContext && (
           <div className="space-y-3 pt-3 border-t border-border/50">
             <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
               AI Context
@@ -438,8 +525,32 @@ export const SettingsPanel = ({
               </div>
             )}
           </div>
+    </div>
+  );
+
+  if (embedded) {
+    return settingsBody;
+  }
+
+  return (
+    <div className="rounded-lg border border-border/50 bg-muted/30 overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setIsOpen(!isOpen)}
+        className="w-full flex items-center justify-between p-3 hover:bg-muted/50 transition-colors"
+      >
+        <div className="flex items-center gap-2">
+          <SettingsIcon className="w-3.5 h-3.5 text-muted-foreground" />
+          <span className="text-xs font-medium">Settings</span>
         </div>
-      )}
+        <ChevronDownIcon
+          className={cn(
+            "w-4 h-4 text-muted-foreground transition-transform",
+            isOpen && "rotate-180"
+          )}
+        />
+      </button>
+      {isOpen && settingsBody}
     </div>
   );
 };

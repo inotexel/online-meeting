@@ -1,94 +1,346 @@
-import { useEffect, useLayoutEffect, useRef } from "react";
-import { ScrollArea } from "@/components";
 import { RadioIcon } from "lucide-react";
+
+import { Switch } from "@/components";
+
 import { cn } from "@/lib/utils";
 
+/** Re-enable when speaker diarization toggle should appear in the realtime UI. */
+const SHOW_SPEAKER_TOGGLE = false;
+
+
+
 export interface LiveTranscriptSegment {
+
   id: string;
+
   text: string;
+
   isFinal: boolean;
+
+  speakerLabel?: string | null;
+
 }
+
+
 
 interface LiveTranscriptProps {
+
   segments: LiveTranscriptSegment[];
+
   pendingDelta: string;
+
+  pendingSpeakerLabel?: string | null;
+
   isSessionActive: boolean;
+
   isCapturing?: boolean;
+
+  showSpeakerLabels?: boolean;
+
+  speakerLabelsEnabled?: boolean;
+
+  onSpeakerLabelsChange?: (enabled: boolean) => void;
+
+  speakerToggleDisabled?: boolean;
+
+  readOnly?: boolean;
+
+  title?: string;
+
+  emptyMessage?: string;
+
+  /** `caption` shows only the current utterance; `scroll` keeps full history */
+
+  displayMode?: "caption" | "scroll";
+
+  maxHeightClass?: string;
+
 }
 
+
+
+export function formatSpeakerLabel(label?: string | null): string | null {
+
+  if (!label || label === "UNKNOWN") return null;
+
+  if (label === "user") return "You";
+
+  if (label === "client") return "Client";
+
+  const letter = label.trim().toUpperCase();
+
+  if (letter.length === 1 && letter >= "A" && letter <= "Z") {
+
+    return `Speaker ${letter.charCodeAt(0) - 64}`;
+
+  }
+
+  return `Speaker ${label}`;
+
+}
+
+
+
 export const LiveTranscript = ({
+
   segments,
+
   pendingDelta,
+
+  pendingSpeakerLabel,
+
   isSessionActive,
+
   isCapturing = false,
+
+  showSpeakerLabels = false,
+
+  speakerLabelsEnabled = false,
+
+  onSpeakerLabelsChange,
+
+  speakerToggleDisabled = false,
+
+  readOnly = false,
+
+  title = "Live Transcript",
+
+  emptyMessage,
+
+  displayMode = "caption",
+
+  maxHeightClass = "max-h-64",
+
 }: LiveTranscriptProps) => {
-  const bottomRef = useRef<HTMLDivElement>(null);
 
-  const lastSegmentText = segments[segments.length - 1]?.text ?? "";
-  const showPending =
-    pendingDelta.trim().length > 0 && pendingDelta.trim() !== lastSegmentText;
-  const hasContent = segments.length > 0 || showPending;
+  const pendingText = pendingDelta.trim();
 
-  useLayoutEffect(() => {
-    const viewport = bottomRef.current?.closest(
-      "[data-slot='scroll-area-viewport']"
-    ) as HTMLElement | null;
+  const lastSegment = segments[segments.length - 1];
 
-    if (!viewport) return;
-    viewport.scrollTop = viewport.scrollHeight;
-  }, [segments, pendingDelta, showPending]);
+  const captionText = pendingText || lastSegment?.text || "";
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
-  }, [segments, showPending]);
+  const captionSpeaker = pendingText
+
+    ? pendingSpeakerLabel
+
+    : lastSegment?.speakerLabel;
+
+  const isCaptionPending = pendingText.length > 0;
+
+  const hasContent =
+
+    displayMode === "caption"
+
+      ? captionText.length > 0
+
+      : segments.length > 0 || pendingText.length > 0;
+
+
+
+  const renderLine = (
+
+    text: string,
+
+    speakerLabel?: string | null,
+
+    italic = false
+
+  ) => {
+
+    const speaker = showSpeakerLabels
+
+      ? formatSpeakerLabel(speakerLabel)
+
+      : null;
+
+
+
+    return (
+
+      <p
+
+        className={cn(
+
+          "text-base leading-relaxed",
+
+          italic ? "text-muted-foreground italic" : "text-foreground"
+
+        )}
+
+      >
+
+        {speaker && (
+
+          <span className="font-semibold text-primary not-italic mr-1.5">
+
+            {speaker}:
+
+          </span>
+
+        )}
+
+        {text}
+
+      </p>
+
+    );
+
+  };
+
+
 
   return (
+
     <div className="rounded-lg border border-border/50 bg-muted/30 overflow-hidden">
-      <div className="flex items-center justify-between px-3 py-2 border-b border-border/40">
-        <div className="flex items-center gap-2">
+
+      <div className="flex items-center justify-between px-3 py-2 border-b border-border/40 gap-2">
+
+        <div className="flex items-center gap-2 min-w-0">
+
           <RadioIcon
+
             className={cn(
-              "w-3.5 h-3.5",
+
+              "w-3.5 h-3.5 flex-shrink-0",
+
               isSessionActive ? "text-green-500 animate-pulse" : "text-muted-foreground"
+
             )}
+
           />
-          <span className="text-xs font-medium">Live Transcript</span>
+
+          <span className="text-sm font-medium truncate">{title}</span>
+
         </div>
-        {isSessionActive && (
-          <span className="text-[9px] text-green-600 font-medium">Listening…</span>
-        )}
+
+        <div className="flex items-center gap-2 flex-shrink-0">
+
+          {SHOW_SPEAKER_TOGGLE && !readOnly && onSpeakerLabelsChange && (
+
+            <div className="flex items-center gap-1.5">
+
+              <span className="text-[9px] text-muted-foreground whitespace-nowrap">
+
+                Speakers
+
+              </span>
+
+              <Switch
+
+                checked={speakerLabelsEnabled}
+
+                onCheckedChange={onSpeakerLabelsChange}
+
+                disabled={speakerToggleDisabled}
+
+                className="scale-75"
+
+              />
+
+            </div>
+
+          )}
+
+          {!readOnly && isSessionActive && (
+
+            <span className="text-[9px] text-green-600 font-medium whitespace-nowrap">
+
+              Listening…
+
+            </span>
+
+          )}
+
+        </div>
+
       </div>
 
-      <ScrollArea className="max-h-64">
-        <div className="p-3 space-y-2">
-          {!hasContent && (
-            <p className="text-[10px] text-muted-foreground text-center py-4">
-              {isSessionActive
-                ? "Waiting for speech from system audio…"
-                : isCapturing
-                  ? "Connecting to realtime transcription…"
-                  : "Select Realtime mode and press Start to begin live transcription."}
+
+
+      {displayMode === "caption" ? (
+
+        <div className="min-h-[4rem] p-3 flex items-center">
+
+          {!hasContent ? (
+
+            <p className="text-sm text-muted-foreground text-center w-full py-1">
+
+              {emptyMessage ??
+
+                (isSessionActive
+
+                  ? "Waiting for speech from system audio…"
+
+                  : isCapturing
+
+                    ? "Connecting to realtime transcription…"
+
+                    : "Select Realtime mode and press Start to begin live transcription.")}
+
             </p>
+
+          ) : (
+
+            renderLine(captionText, captionSpeaker, isCaptionPending)
+
           )}
 
-          {segments.map((segment) => (
-            <p
-              key={segment.id}
-              className="text-xs leading-relaxed text-foreground"
-            >
-              {segment.text}
-            </p>
-          ))}
-
-          {showPending && (
-            <p className="text-xs leading-relaxed text-muted-foreground italic">
-              {pendingDelta}
-            </p>
-          )}
-
-          <div ref={bottomRef} aria-hidden className="h-px" />
         </div>
-      </ScrollArea>
+
+      ) : (
+
+        <div className={cn("overflow-y-auto", maxHeightClass)}>
+
+          <div className="p-3 space-y-2">
+
+            {!hasContent && (
+
+              <p className="text-sm text-muted-foreground text-center py-4">
+
+                {emptyMessage ??
+
+                  (isSessionActive
+
+                    ? "Waiting for speech from system audio…"
+
+                    : isCapturing
+
+                      ? "Connecting to realtime transcription…"
+
+                      : "Select Realtime mode and press Start to begin live transcription.")}
+
+              </p>
+
+            )}
+
+
+
+            {segments.map((segment) => (
+
+              <div key={segment.id}>
+
+                {renderLine(segment.text, segment.speakerLabel)}
+
+              </div>
+
+            ))}
+
+
+
+            {pendingText.length > 0 &&
+
+              renderLine(pendingDelta, pendingSpeakerLabel, true)}
+
+          </div>
+
+        </div>
+
+      )}
+
     </div>
+
   );
+
 };
+
+

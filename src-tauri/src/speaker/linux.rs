@@ -471,3 +471,207 @@ impl Stream for SpeakerStream {
         Poll::Pending
     }
 }
+
+/// Microphone capture (PulseAudio source, not monitor).
+pub struct MicInput {
+    source_name: Option<String>,
+}
+
+impl MicInput {
+    pub fn new(device_id: Option<String>) -> Result<Self> {
+        let source_name = device_id.filter(|id| !id.is_empty() && id != "default");
+        Ok(Self { source_name })
+    }
+
+    pub fn stream(self) -> MicStream {
+        let sample_queue = Arc::new(Mutex::new(VecDeque::new()));
+        let waker_state = Arc::new(Mutex::new(WakerState {
+            waker: None,
+            has_data: false,
+            shutdown: false,
+        }));
+        let (init_tx, init_rx) = std::sync::mpsc::channel();
+
+        let queue_clone = sample_queue.clone();
+        let waker_clone = waker_state.clone();
+        let source_name = self.source_name;
+
+        let mut capture_thread = Some(thread::spawn(move || {
+            if let Err(e) = MicStream::capture_audio_loop(
+                queue_clone,
+                waker_clone,
+                source_name.as_deref(),
+                init_tx,
+            ) {
+                eprintln!("Mic capture loop failed: {}", e);
+            }
+        }));
+
+        let (sample_rate, init_success) = match init_rx.recv() {
+            Ok(Ok(sr)) => (sr, true),
+            Ok(Err(e)) => {
+                eprintln!("Mic initialization failed: {}", e);
+                (DEFAULT_SAMPLE_RATE, false)
+            }
+            Err(e) => {
+                eprintln!("Failed to receive mic init signal: {}", e);
+                (DEFAULT_SAMPLE_RATE, false)
+            }
+        };
+
+        if !init_success {
+            {
+                let mut state = waker_state.lock().unwrap();
+                state.shutdown = true;
+                if let Some(waker) = state.waker.take() {
+                    drop(state);
+                    waker.wake();
+                }
+            }
+            if let Some(handle) = capture_thread.take() {
+                let _ = handle.join();
+            }
+        }
+
+        MicStream {
+            sample_queue,
+            waker_state,
+            capture_thread,
+            sample_rate,
+        }
+    }
+}
+
+pub struct MicStream {
+    sample_queue: Arc<Mutex<VecDeque<f32>>>,
+    waker_state: Arc<Mutex<WakerState>>,
+    capture_thread: Option<thread::JoinHandle<()>>,
+    sample_rate: u32,
+}
+
+impl MicStream {
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    fn capture_audio_loop(
+        sample_queue: Arc<Mutex<VecDeque<f32>>>,
+        waker_state: Arc<Mutex<WakerState>>,
+        source_name: Option<&str>,
+        init_tx: std::sync::mpsc::Sender<Result<u32>>,
+    ) -> Result<()> {
+        let spec = Spec {
+            format: Format::F32le,
+            channels: 1,
+            rate: 44100,
+        };
+
+        if !spec.is_valid() {
+            return Err(anyhow!("Invalid audio specification"));
+        }
+
+        let final_source = source_name.map(|s| s.to_string());
+
+        let init_result: Result<(Simple, u32)> = (|| {
+            let simple = Simple::new(
+                None,
+                "pluely",
+                Direction::Record,
+                final_source.as_deref(),
+                "Microphone Capture",
+                &spec,
+                None,
+                None,
+            )
+            .map_err(|e| anyhow!("Failed to create PulseAudio mic connection: {}", e))?;
+            Ok((simple, spec.rate))
+        })();
+
+        match init_result {
+            Ok((simple, sample_rate)) => {
+                let _ = init_tx.send(Ok(sample_rate));
+                let mut buffer = vec![0u8; 4096];
+                loop {
+                    if waker_state.lock().unwrap().shutdown {
+                        break;
+                    }
+                    match simple.read(&mut buffer) {
+                        Ok(_) => {
+                            let samples: Vec<f32> = buffer
+                                .chunks_exact(4)
+                                .map(|chunk| {
+                                    f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                                })
+                                .collect();
+                            if !samples.is_empty() {
+                                {
+                                    let mut queue = sample_queue.lock().unwrap();
+                                    let max_buffer_size = 131072;
+                                    queue.extend(samples.iter());
+                                    if queue.len() > max_buffer_size {
+                                        let to_drop = queue.len() - max_buffer_size;
+                                        queue.drain(0..to_drop);
+                                    }
+                                }
+                                let mut state = waker_state.lock().unwrap();
+                                if !state.has_data {
+                                    state.has_data = true;
+                                    if let Some(waker) = state.waker.take() {
+                                        drop(state);
+                                        waker.wake();
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("[mic capture] PulseAudio read error: {}", e);
+                            thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = init_tx.send(Err(e));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for MicStream {
+    fn drop(&mut self) {
+        {
+            let mut state = self.waker_state.lock().unwrap();
+            state.shutdown = true;
+            if let Some(waker) = state.waker.take() {
+                waker.wake();
+            }
+        }
+        if let Some(thread) = self.capture_thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Stream for MicStream {
+    type Item = f32;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let mut queue = self.sample_queue.lock().unwrap();
+        if let Some(sample) = queue.pop_front() {
+            return Poll::Ready(Some(sample));
+        }
+
+        let mut state = self.waker_state.lock().unwrap();
+        if state.shutdown {
+            return Poll::Ready(None);
+        }
+
+        state.has_data = false;
+        state.waker = Some(cx.waker().clone());
+        Poll::Pending
+    }
+}

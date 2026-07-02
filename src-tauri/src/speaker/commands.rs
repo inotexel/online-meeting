@@ -1,5 +1,5 @@
 // Pluely AI Speech Detection, and capture system audio (speaker output) as a stream of f32 samples.
-use crate::speaker::{realtime::RealtimeConfig, AudioDevice, SpeakerInput};
+use crate::speaker::{assemblyai::AssemblyAiConfig, realtime::RealtimeConfig, AudioDevice, MicInput, SpeakerInput};
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use futures_util::StreamExt;
@@ -32,6 +32,14 @@ pub struct VadConfig {
     pub realtime_model: Option<String>,
     #[serde(default)]
     pub realtime_language: Option<String>,
+    #[serde(default)]
+    pub realtime_speaker_labels: Option<bool>,
+    #[serde(default)]
+    pub realtime_max_speakers: Option<u32>,
+    #[serde(default)]
+    pub realtime_assemblyai_model: Option<String>,
+    #[serde(default)]
+    pub assemblyai_api_key: Option<String>,
 }
 
 impl Default for VadConfig {
@@ -49,6 +57,10 @@ impl Default for VadConfig {
             max_recording_duration_secs: 180, // 3 minutes default
             realtime_model: Some("gpt-realtime-whisper".to_string()),
             realtime_language: Some("en".to_string()),
+            realtime_speaker_labels: Some(false),
+            realtime_max_speakers: Some(5),
+            realtime_assemblyai_model: Some("universal-streaming-english".to_string()),
+            assemblyai_api_key: None,
         }
     }
 }
@@ -70,7 +82,9 @@ pub async fn start_system_audio_capture(
     app: AppHandle,
     vad_config: Option<VadConfig>,
     device_id: Option<String>,
+    input_device_id: Option<String>,
     realtime_config: Option<RealtimeConfig>,
+    assemblyai_config: Option<AssemblyAiConfig>,
 ) -> Result<(), String> {
     let state = app.state::<crate::AudioState>();
 
@@ -96,13 +110,53 @@ pub async fn start_system_audio_capture(
         *vad_cfg = config;
     }
 
-    let input = SpeakerInput::new_with_device(device_id).map_err(|e| {
-        error!("Failed to create speaker input: {}", e);
-        format!("Failed to access system audio: {}", e)
-    })?;
+    let vad_config = state
+        .vad_config
+        .lock()
+        .map_err(|e| format!("Failed to read VAD config: {}", e))?
+        .clone();
 
-    let stream = input.stream();
-    let sr = stream.sample_rate();
+    let capture_mode = resolve_capture_mode(&vad_config).to_string();
+    let is_dual_realtime = capture_mode == "realtime"
+        && !vad_config
+            .realtime_speaker_labels
+            .unwrap_or(false);
+
+    let client_input = if is_dual_realtime {
+        SpeakerInput::new_with_device(device_id.clone()).map_err(|e| {
+            error!("Failed to create speaker input: {}", e);
+            format!("Failed to access system audio: {}", e)
+        })?
+    } else {
+        SpeakerInput::new_with_device(device_id).map_err(|e| {
+            error!("Failed to create speaker input: {}", e);
+            format!("Failed to access system audio: {}", e)
+        })?
+    };
+
+    let mic_input = if is_dual_realtime {
+        match MicInput::new_with_device(input_device_id) {
+            Ok(input) => Some(input),
+            Err(e) => {
+                warn!(
+                    "Microphone unavailable ({}); continuing with meeting audio only",
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let client_stream = client_input.stream();
+    let sr = client_stream.sample_rate();
+
+    let mic_stream_and_sr = mic_input.map(|input| {
+        let stream = input.stream();
+        let mic_sr = stream.sample_rate();
+        (stream, mic_sr)
+    });
 
     // Validate sample rate
     if !(8000..=96000).contains(&sr) {
@@ -113,12 +167,17 @@ pub async fn start_system_audio_capture(
         ));
     }
 
+    if let Some((_, mic_sr)) = &mic_stream_and_sr {
+        if !(8000..=96000).contains(mic_sr) {
+            error!("Invalid mic sample rate: {}", mic_sr);
+            return Err(format!(
+                "Invalid mic sample rate: {}. Expected 8000-96000 Hz",
+                mic_sr
+            ));
+        }
+    }
+
     let app_clone = app.clone();
-    let vad_config = state
-        .vad_config
-        .lock()
-        .map_err(|e| format!("Failed to read VAD config: {}", e))?
-        .clone();
     let capture_mode = resolve_capture_mode(&vad_config).to_string();
 
     // Mark as capturing BEFORE spawning task
@@ -134,38 +193,106 @@ pub async fn start_system_audio_capture(
     let task = tokio::spawn(async move {
         match capture_mode.as_str() {
             "realtime" => {
-                let realtime_cfg = match realtime_config {
-                    Some(cfg) if !cfg.api_key.is_empty() => cfg,
-                    _ => {
-                        let _ = app_clone.emit(
-                            "realtime-transcription-error",
-                            "OpenAI API key is required for realtime transcription",
-                        );
-                        let state = app_clone.state::<crate::AudioState>();
-                        if let Ok(mut guard) = state.stream_task.lock() {
-                            *guard = None;
+                let use_speaker_labels = vad_config
+                    .realtime_speaker_labels
+                    .unwrap_or(false);
+
+                if use_speaker_labels {
+                    let assembly_cfg = match assemblyai_config {
+                        Some(cfg) if !cfg.api_key.is_empty() => cfg,
+                        _ => {
+                            let _ = app_clone.emit(
+                                "realtime-transcription-error",
+                                "AssemblyAI API key is required for speaker identification",
+                            );
+                            let state = app_clone.state::<crate::AudioState>();
+                            if let Ok(mut guard) = state.stream_task.lock() {
+                                *guard = None;
+                            }
+                            *state
+                                .is_capturing
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+                            let _ = app_clone.emit("capture-stopped", ());
+                            return;
                         }
-                        *state
-                            .is_capturing
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
-                        let _ = app_clone.emit("capture-stopped", ());
-                        return;
+                    };
+                    crate::speaker::assemblyai::run_assemblyai_capture(
+                        app_clone.clone(),
+                        client_stream,
+                        sr,
+                        assembly_cfg,
+                    )
+                    .await;
+                } else {
+                    let realtime_cfg = match realtime_config {
+                        Some(cfg) if !cfg.api_key.is_empty() => cfg,
+                        _ => {
+                            let _ = app_clone.emit(
+                                "realtime-transcription-error",
+                                "OpenAI API key is required for realtime transcription",
+                            );
+                            let state = app_clone.state::<crate::AudioState>();
+                            if let Ok(mut guard) = state.stream_task.lock() {
+                                *guard = None;
+                            }
+                            *state
+                                .is_capturing
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+                            let _ = app_clone.emit("capture-stopped", ());
+                            return;
+                        }
+                    };
+
+                    if let Some((mic_stream, mic_sr)) = mic_stream_and_sr {
+                        let app_mic = app_clone.clone();
+                        let app_client = app_clone.clone();
+                        let cfg_mic = realtime_cfg.clone();
+                        let cfg_client = realtime_cfg;
+
+                        // Run both streams in this task (not nested spawn) so stop/abort
+                        // tears down mic + meeting capture together.
+                        tokio::join!(
+                            async {
+                                tokio::time::sleep(Duration::from_millis(600)).await;
+                                crate::speaker::realtime::run_realtime_capture(
+                                    app_mic,
+                                    mic_stream,
+                                    mic_sr,
+                                    cfg_mic,
+                                    "user",
+                                    false,
+                                )
+                                .await;
+                            },
+                            crate::speaker::realtime::run_realtime_capture(
+                                app_client,
+                                client_stream,
+                                sr,
+                                cfg_client,
+                                "client",
+                                true,
+                            ),
+                        );
+                    } else {
+                        crate::speaker::realtime::run_realtime_capture(
+                            app_clone.clone(),
+                            client_stream,
+                            sr,
+                            realtime_cfg,
+                            "client",
+                            true,
+                        )
+                        .await;
                     }
-                };
-                crate::speaker::realtime::run_realtime_capture(
-                    app_clone.clone(),
-                    stream,
-                    sr,
-                    realtime_cfg,
-                )
-                .await;
+                }
             }
             "continuous" => {
-                run_continuous_capture(app_clone.clone(), stream, sr, vad_config).await;
+                run_continuous_capture(app_clone.clone(), client_stream, sr, vad_config).await;
             }
             _ => {
-                run_vad_capture(app_clone.clone(), stream, sr, vad_config).await;
+                run_vad_capture(app_clone.clone(), client_stream, sr, vad_config).await;
             }
         }
 
