@@ -4,7 +4,6 @@ import { cn } from "@/lib/utils";
 import {
   ChevronDownIcon,
   ExpandIcon,
-  Maximize2Icon,
   RectangleHorizontalIcon,
 } from "lucide-react";
 
@@ -12,18 +11,12 @@ const MODES: {
   id: OverlaySizeMode;
   label: string;
   title: string;
-  icon: typeof Maximize2Icon;
+  icon: typeof ExpandIcon;
 }[] = [
-  {
-    id: "fit",
-    label: "Fit",
-    title: "Fit to screen (recommended)",
-    icon: Maximize2Icon,
-  },
   {
     id: "original",
     label: "Original",
-    title: "Original compact panel size",
+    title: "Compact panel size",
     icon: RectangleHorizontalIcon,
   },
   {
@@ -45,16 +38,12 @@ export const OverlaySizeToggle = ({
   onChange,
   disabled = false,
 }: OverlaySizeToggleProps) => {
-  const active =
-    MODES.find((mode) => mode.id === value) ?? MODES[0];
+  const active = MODES.find((mode) => mode.id === value) ?? MODES[0];
   const ActiveIcon = active.icon;
   const otherModes = MODES.filter((mode) => mode.id !== value);
 
   return (
-    <div
-      className="relative group"
-      aria-label="Overlay size"
-    >
+    <div className="relative group" aria-label="Overlay size">
       <Button
         type="button"
         size="sm"

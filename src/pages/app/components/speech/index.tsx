@@ -3,7 +3,6 @@ import {
   Button,
   Popover,
   PopoverTrigger,
-  PopoverContent,
 } from "@/components";
 import {
   HeadphonesIcon,
@@ -239,23 +238,51 @@ export const SystemAudio = (props: useSystemAudioType) => {
     streamAsk: streamMeetingAskQuestion,
   };
 
+  const speechPanelLayout = useCallback(
+    () => ({
+      sizeMode: overlaySizeMode,
+      originalHeight: expandedOriginalHeight,
+    }),
+    [overlaySizeMode, expandedOriginalHeight]
+  );
+
+  const setSpeechPanelOpen = useCallback(
+    (open: boolean) => {
+      if (capturing && !open) {
+        return;
+      }
+      if (open) {
+        document.body.dataset.pluelySpeechPanelOpen = "true";
+      } else {
+        delete document.body.dataset.pluelySpeechPanelOpen;
+      }
+      setIsPopoverOpen(open);
+      void resizeWindow(open, open ? speechPanelLayout() : undefined);
+    },
+    [capturing, resizeWindow, setIsPopoverOpen, speechPanelLayout]
+  );
+
   useEffect(() => {
     if (!isPopoverOpen) return;
-    void resizeWindow(true, { originalHeight: expandedOriginalHeight });
-  }, [capturing, expandedOriginalHeight, isPopoverOpen, resizeWindow]);
+    void resizeWindow(true, speechPanelLayout());
+  }, [capturing, isPopoverOpen, resizeWindow, speechPanelLayout]);
+
+  useEffect(() => {
+    if (isPopoverOpen) {
+      document.body.dataset.pluelySpeechPanelOpen = "true";
+    } else {
+      delete document.body.dataset.pluelySpeechPanelOpen;
+    }
+    return () => {
+      delete document.body.dataset.pluelySpeechPanelOpen;
+    };
+  }, [isPopoverOpen]);
 
   return (
+    <>
     <Popover
       open={isPopoverOpen}
-      onOpenChange={(open) => {
-        if (capturing && !open) {
-          return;
-        }
-        setIsPopoverOpen(open);
-        void resizeWindow(open, {
-          originalHeight: expandedOriginalHeight,
-        });
-      }}
+      onOpenChange={setSpeechPanelOpen}
     >
       <PopoverTrigger asChild>
         <Button
@@ -270,20 +297,11 @@ export const SystemAudio = (props: useSystemAudioType) => {
           {getButtonIcon()}
         </Button>
       </PopoverTrigger>
+    </Popover>
 
-      <PopoverContent
-        align="end"
-        side="bottom"
-        className="w-screen overflow-hidden border border-input/50 p-0 shadow-lg"
-        sideOffset={8}
-      >
-          <div
-            className="flex flex-col overflow-hidden"
-            style={{
-              height: expandedOriginalHeight,
-              maxHeight: "calc(100vh - 2.5rem)",
-            }}
-          >
+    {isPopoverOpen && (
+      <div className="fixed inset-0 z-[100] flex flex-col overflow-hidden bg-background">
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             {/* Header - Mode Switcher + Actions */}
             <div className="flex-shrink-0 select-none border-b border-border/50 p-3">
               <div className="flex items-center justify-between gap-2">
@@ -385,8 +403,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
                       className="h-6 w-6"
                       title="Close"
                       onClick={() => {
-                        setIsPopoverOpen(false);
-                        resizeWindow(false);
+                        setSpeechPanelOpen(false);
                       }}
                     >
                       <XIcon className="h-3.5 w-3.5" />
@@ -577,7 +594,8 @@ export const SystemAudio = (props: useSystemAudioType) => {
             )}
 
           </div>
-        </PopoverContent>
-    </Popover>
+      </div>
+    )}
+    </>
   );
 };
