@@ -20,7 +20,7 @@ import {
   RotateCcwIcon,
   ChevronUpIcon,
 } from "lucide-react";
-import { VadConfig, CaptureMode } from "@/hooks/useSystemAudio";
+import { VadConfig, CaptureMode, shouldCaptureUserMic } from "@/hooks/useSystemAudio";
 import {
   PROMPT_TEMPLATES,
   getPromptTemplateById,
@@ -144,6 +144,7 @@ export const SettingsPanel = ({
       realtime_max_speakers: 5,
       realtime_assemblyai_model: "universal-streaming-english",
       assemblyai_api_key: "",
+      capture_user_mic: false,
     };
     onUpdateVadConfig(defaultConfig);
   };
@@ -190,6 +191,30 @@ export const SettingsPanel = ({
                     : SENSITIVITY_PRESETS[currentPreset as SensitivityPreset]
                         .description}
                 </p>
+              </div>
+            )}
+
+            {(isVadMode ||
+              (isRealtimeMode && !vadConfig.realtime_speaker_labels)) && (
+              <div className="flex items-center justify-between gap-4">
+                <div className="flex-1">
+                  <Label className="text-xs font-medium">
+                    Capture your microphone
+                  </Label>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">
+                    When on, your mic is transcribed as User and sent to the
+                    coach. When off, only meeting audio (Client) is used.
+                  </p>
+                </div>
+                <Switch
+                  checked={shouldCaptureUserMic(vadConfig)}
+                  onCheckedChange={(checked) =>
+                    onUpdateVadConfig({
+                      ...vadConfig,
+                      capture_user_mic: checked,
+                    })
+                  }
+                />
               </div>
             )}
 

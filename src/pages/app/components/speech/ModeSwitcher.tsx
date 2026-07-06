@@ -2,6 +2,9 @@ import { cn } from "@/lib/utils";
 import { AudioWaveformIcon, RadioIcon } from "lucide-react";
 import { CaptureMode } from "@/hooks/useSystemAudio";
 
+/** Re-enable when realtime capture should appear in the mode switcher. */
+const SHOW_REALTIME_MODE = false;
+
 interface ModeSwitcherProps {
   captureMode: CaptureMode;
   onModeChange: (mode: CaptureMode) => void;
@@ -33,7 +36,14 @@ export const ModeSwitcher = ({
   onModeChange,
   disabled = false,
 }: ModeSwitcherProps) => {
-  const activeMode = captureMode === "continuous" ? "vad" : captureMode;
+  const visibleModes = SHOW_REALTIME_MODE
+    ? MODES
+    : MODES.filter((mode) => mode.id !== "realtime");
+
+  const activeMode =
+    captureMode === "continuous" || captureMode === "realtime"
+      ? "vad"
+      : captureMode;
 
   return (
     <div
@@ -42,7 +52,8 @@ export const ModeSwitcher = ({
         disabled && "opacity-50 pointer-events-none"
       )}
     >
-      {MODES.map(({ id, icon: Icon, label, description }) => (        <button
+      {visibleModes.map(({ id, icon: Icon, label, description }) => (
+        <button
           key={id}
           type="button"
           onClick={() => onModeChange(id)}

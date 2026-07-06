@@ -1,8 +1,12 @@
-use super::env::{load_dotenv, neo4j_env_ready};
+use super::env::{
+    load_dotenv, neo4j_database, neo4j_env_ready, neo4j_password, neo4j_uri, neo4j_user,
+};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::error::Error;
+use std::time::Duration;
 
 #[derive(Clone)]
 pub struct Neo4jClient {
@@ -32,12 +36,12 @@ struct QueryData {
 impl Neo4jClient {
     pub fn from_env() -> Result<Self, String> {
         load_dotenv();
-        let uri = std::env::var("NEO4J_URI")
-            .map_err(|_| "NEO4J_URI is not set in src-tauri/.env".to_string())?;
-        let user = std::env::var("NEO4J_USER").unwrap_or_else(|_| "neo4j".to_string());
-        let password = std::env::var("NEO4J_PASSWORD")
-            .map_err(|_| "NEO4J_PASSWORD is not set in src-tauri/.env".to_string())?;
-        let database = std::env::var("NEO4J_DATABASE").unwrap_or_else(|_| "neo4j".to_string());
+        let uri = neo4j_uri()
+            .ok_or_else(|| "Neo4j is not configured in this build.".to_string())?;
+        let user = neo4j_user().unwrap_or_else(|| "neo4j".to_string());
+        let password = neo4j_password()
+            .ok_or_else(|| "Neo4j is not configured in this build.".to_string())?;
+        let database = neo4j_database().unwrap_or_else(|| "neo4j".to_string());
 
         let http_base = bolt_uri_to_https(&uri);
         let token = B64.encode(format!("{user}:{password}"));
@@ -46,7 +50,11 @@ impl Neo4jClient {
         Ok(Self {
             http_base,
             auth_header,
-            http: Client::new(),
+            http: Client::builder()
+                .connect_timeout(Duration::from_secs(15))
+                .timeout(Duration::from_secs(60))
+                .build()
+                .map_err(|e| format!("Failed to create Neo4j HTTP client: {e}"))?,
             database,
         })
     }
@@ -74,7 +82,7 @@ impl Neo4jClient {
             }))
             .send()
             .await
-            .map_err(|e| format!("Neo4j HTTP request failed: {e}"))?;
+            .map_err(format_neo4j_transport_error)?;
 
         let status = response.status();
         let body: QueryResponse = response
@@ -176,6 +184,20 @@ fn constraint_error_is_benign(err: &str) -> bool {
         || err.contains("An equivalent constraint already exists")
 }
 
+fn format_neo4j_transport_error(err: reqwest::Error) -> String {
+    let mut msg = format!("Neo4j HTTP request failed: {err}");
+    let mut source = err.source();
+    while let Some(cause) = source {
+        msg.push_str(&format!(" ({cause})"));
+        source = cause.source();
+    }
+    msg.push_str(
+        ". Check that your Aura instance is running (not paused), NEO4J_URI uses neo4j+s://, \
+         and outbound HTTPS is allowed.",
+    );
+    msg
+}
+
 fn bolt_uri_to_https(uri: &str) -> String {
     let trimmed = uri.trim();
     if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
@@ -189,6 +211,24 @@ fn bolt_uri_to_https(uri: &str) -> String {
         .replace("bolt://", "http://")
         .trim_end_matches('/')
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn neo4j_http_query_from_env_file() {
+        load_dotenv();
+        if !neo4j_env_ready() {
+            eprintln!("Skipping Neo4j test: NEO4J_URI / NEO4J_PASSWORD not set");
+            return;
+        }
+
+        let client = Neo4jClient::from_env().expect("Neo4jClient::from_env");
+        let result = client.run("RETURN 1 AS n", json!({})).await;
+        assert!(result.is_ok(), "Neo4j query failed: {:?}", result.err());
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

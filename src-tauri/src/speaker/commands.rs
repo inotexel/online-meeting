@@ -40,6 +40,8 @@ pub struct VadConfig {
     pub realtime_assemblyai_model: Option<String>,
     #[serde(default)]
     pub assemblyai_api_key: Option<String>,
+    #[serde(default)]
+    pub capture_user_mic: Option<bool>,
 }
 
 impl Default for VadConfig {
@@ -61,6 +63,7 @@ impl Default for VadConfig {
             realtime_max_speakers: Some(5),
             realtime_assemblyai_model: Some("universal-streaming-english".to_string()),
             assemblyai_api_key: None,
+            capture_user_mic: Some(false),
         }
     }
 }
@@ -75,6 +78,22 @@ fn resolve_capture_mode(vad_config: &VadConfig) -> &str {
     } else {
         "continuous"
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SpeechDetectedPayload {
+    speaker: String,
+    audio: String,
+}
+
+fn emit_speech_detected(app: &AppHandle, speaker: &str, audio_b64: String) {
+    let _ = app.emit(
+        "speech-detected",
+        SpeechDetectedPayload {
+            speaker: speaker.to_string(),
+            audio: audio_b64,
+        },
+    );
 }
 
 #[tauri::command]
@@ -121,6 +140,11 @@ pub async fn start_system_audio_capture(
         && !vad_config
             .realtime_speaker_labels
             .unwrap_or(false);
+    let is_dual_vad = capture_mode == "vad";
+
+    let capture_user_mic = vad_config.capture_user_mic.unwrap_or(false);
+    let needs_mic_input =
+        capture_user_mic && (is_dual_realtime || is_dual_vad);
 
     let client_input = if is_dual_realtime {
         SpeakerInput::new_with_device(device_id.clone()).map_err(|e| {
@@ -134,7 +158,7 @@ pub async fn start_system_audio_capture(
         })?
     };
 
-    let mic_input = if is_dual_realtime {
+    let mic_input = if needs_mic_input {
         match MicInput::new_with_device(input_device_id) {
             Ok(input) => Some(input),
             Err(e) => {
@@ -292,7 +316,24 @@ pub async fn start_system_audio_capture(
                 run_continuous_capture(app_clone.clone(), client_stream, sr, vad_config).await;
             }
             _ => {
-                run_vad_capture(app_clone.clone(), client_stream, sr, vad_config).await;
+                if let Some((mic_stream, mic_sr)) = mic_stream_and_sr {
+                    let app_user = app_clone.clone();
+                    let app_client = app_clone.clone();
+                    let cfg = vad_config.clone();
+                    tokio::join!(
+                        run_vad_capture(app_user, mic_stream, mic_sr, cfg.clone(), "user"),
+                        run_vad_capture(app_client, client_stream, sr, cfg, "client"),
+                    );
+                } else {
+                    run_vad_capture(
+                        app_clone.clone(),
+                        client_stream,
+                        sr,
+                        vad_config,
+                        "client",
+                    )
+                    .await;
+                }
             }
         }
 
@@ -323,6 +364,7 @@ async fn run_vad_capture(
     stream: impl StreamExt<Item = f32> + Unpin,
     sr: u32,
     config: VadConfig,
+    speaker_label: &'static str,
 ) {
     let mut stream = stream;
     let mut buffer: VecDeque<f32> = VecDeque::new();
@@ -372,8 +414,7 @@ async fn run_vad_capture(
                 if speech_buffer.len() > max_samples {
                     let normalized_buffer = normalize_audio_level(&speech_buffer, 0.1);
                     if let Ok(b64) = samples_to_wav_b64(sr, &normalized_buffer) {
-                        // let duration = speech_buffer.len() as f32 / sr as f32;
-                        let _ = app.emit("speech-detected", b64);
+                        emit_speech_detected(&app, speaker_label, b64);
                     }
                     speech_buffer.clear();
                     in_speech = false;
@@ -404,8 +445,7 @@ async fn run_vad_capture(
                             // Emit complete speech segment
                             let normalized_buffer = normalize_audio_level(&speech_buffer, 0.1);
                             if let Ok(b64) = samples_to_wav_b64(sr, &normalized_buffer) {
-                                // let duration = speech_buffer.len() as f32 / sr as f32;
-                                let _ = app.emit("speech-detected", b64);
+                                emit_speech_detected(&app, speaker_label, b64);
                             } else {
                                 error!("Failed to encode speech to WAV");
                                 let _ = app.emit("audio-encoding-error", "Failed to encode speech");
@@ -530,7 +570,7 @@ async fn run_continuous_capture(
 
         match samples_to_wav_b64(sr, &cleaned_audio) {
             Ok(b64) => {
-                let _ = app.emit("speech-detected", b64);
+                emit_speech_detected(&app, "client", b64);
             }
             Err(e) => {
                 error!("Failed to encode continuous audio: {}", e);

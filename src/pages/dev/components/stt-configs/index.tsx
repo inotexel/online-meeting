@@ -1,21 +1,20 @@
 import { Header } from "@/components";
 import { UseSettingsReturn } from "@/types";
-import { Providers } from "./Providers";
-import { CustomProviders } from "./CustomProvider";
+import { SttModelSettings } from "./SttModelSettings";
 
 export const STTProviders = (settings: UseSettingsReturn) => {
   return (
     <div id="stt-providers" className="space-y-3">
       <Header
-        title="STT Providers"
-        description="Select your preferred STT service provider to get started."
+        title="Speech-to-text"
+        description="Provider, API key, and model for live call transcription."
         isMainTitle
       />
-
-      {/* Custom Provider */}
-      <CustomProviders {...settings} />
-      {/* Providers Selection */}
-      <Providers {...settings} />
+      <SttModelSettings
+        allSttProviders={settings.allSttProviders}
+        selectedSttProvider={settings.selectedSttProvider}
+        onSetSelectedSttProvider={settings.onSetSelectedSttProvider}
+      />
     </div>
   );
 };
