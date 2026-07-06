@@ -1,4 +1,5 @@
 import { Button, Header, Input, Selection, TextInput } from "@/components";
+import { ModelSelect } from "@/components/ModelSelect";
 import { UseSettingsReturn } from "@/types";
 import curl2Json, { ResultJSON } from "@bany/curl-to-json";
 import { KeyIcon, TrashIcon } from "lucide-react";
@@ -183,6 +184,34 @@ export const Providers = ({
               if (!variable?.key || !selectedAIProvider?.variables) return "";
               return selectedAIProvider.variables[variable.key] || "";
             };
+
+            if (variable.key === "model" && selectedAIProvider?.provider) {
+              return (
+                <ModelSelect
+                  key={variable.key}
+                  providerId={selectedAIProvider.provider}
+                  model={getVariableValue()}
+                  title={variable.value || "Model"}
+                  description={`Exact API model for ${
+                    allAiProviders?.find(
+                      (p) => p?.id === selectedAIProvider?.provider
+                    )?.isCustom
+                      ? "custom provider"
+                      : selectedAIProvider.provider
+                  }`}
+                  onModelChange={(value) => {
+                    if (!selectedAIProvider) return;
+                    onSetSelectedAIProvider({
+                      ...selectedAIProvider,
+                      variables: {
+                        ...selectedAIProvider.variables,
+                        model: value,
+                      },
+                    });
+                  }}
+                />
+              );
+            }
 
             return (
               <div className="space-y-1" key={variable?.key}>

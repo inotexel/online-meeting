@@ -72,6 +72,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
     realtimeSegments,
     realtimePendingDelta,
     realtimePendingSpeakerLabel,
+    vadSegments,
     meetingClientName,
     setMeetingClientName,
     openaiApiKey,
@@ -92,7 +93,6 @@ export const SystemAudio = (props: useSystemAudioType) => {
     runSybillSync,
     cancelSybillSync,
     vadWhisper,
-    vadWhisperLastProspectLine,
     vadWhisperCoachStatus,
     vadWhisperCoachLastError,
     vadWhisperCoachBlockedReason,
@@ -486,8 +486,8 @@ export const SystemAudio = (props: useSystemAudioType) => {
                         realtimeSegments={realtimeSegments}
                         realtimePendingDelta={realtimePendingDelta}
                         realtimePendingSpeakerLabel={realtimePendingSpeakerLabel}
+                        vadSegments={vadSegments}
                         whisper={vadWhisper}
-                        lastProspectLine={vadWhisperLastProspectLine}
                         meetingStage={vadWhisperMeetingStage}
                         isThinking={vadWhisperIsThinking}
                         isMemorySyncing={isMemorySyncing}

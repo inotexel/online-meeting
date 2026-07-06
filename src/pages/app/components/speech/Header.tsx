@@ -101,9 +101,6 @@ export const Header = ({
             {statusConfig.icon}
             {statusConfig.label}
           </span>
-          <span className="text-[10px] text-muted-foreground">
-            {isVadMode ? "Auto-detect" : "Manual"} mode
-          </span>
         </div>
       )}
     </div>

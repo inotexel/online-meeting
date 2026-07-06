@@ -1,20 +1,37 @@
-fn main() {
+fn load_build_env() {
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let env_path = std::path::Path::new(&manifest_dir).join(".env");
+        if env_path.is_file() {
+            let _ = dotenv::from_path(env_path);
+        }
+    }
     dotenv::dotenv().ok();
+}
 
-    if let Ok(payment_endpoint) = std::env::var("PAYMENT_ENDPOINT") {
-        println!("cargo:rustc-env=PAYMENT_ENDPOINT={}", payment_endpoint);
+fn bake_env(key: &str) {
+    if let Ok(value) = std::env::var(key) {
+        if !value.trim().is_empty() {
+            println!("cargo:rustc-env={key}={value}");
+        }
     }
+}
 
-    if let Ok(api_access_key) = std::env::var("API_ACCESS_KEY") {
-        println!("cargo:rustc-env=API_ACCESS_KEY={}", api_access_key);
-    }
+fn main() {
+    load_build_env();
 
-    if let Ok(app_endpoint) = std::env::var("APP_ENDPOINT") {
-        println!("cargo:rustc-env=APP_ENDPOINT={}", app_endpoint);
-    }
-
-    if let Ok(posthog_api_key) = std::env::var("POSTHOG_API_KEY") {
-        println!("cargo:rustc-env=POSTHOG_API_KEY={}", posthog_api_key);
+    for key in [
+        "PAYMENT_ENDPOINT",
+        "API_ACCESS_KEY",
+        "APP_ENDPOINT",
+        "POSTHOG_API_KEY",
+        "NEO4J_URI",
+        "NEO4J_USER",
+        "NEO4J_PASSWORD",
+        "NEO4J_DATABASE",
+        "GOOGLE_CLIENT_ID",
+        "GOOGLE_CLIENT_SECRET",
+    ] {
+        bake_env(key);
     }
 
     tauri_build::build()

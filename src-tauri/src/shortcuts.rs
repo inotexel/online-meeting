@@ -16,6 +16,7 @@ use tokio::time::{sleep, Duration};
 #[cfg(target_os = "macos")]
 use tauri_nspanel::ManagerExt;
 
+use crate::capture::close_overlay_window;
 use crate::window::show_dashboard_window;
 // State for window visibility
 pub struct WindowVisibility {
@@ -676,5 +677,21 @@ fn handle_move_window<R: Runtime>(app: &AppHandle<R>, direction: &str) {
 /// Tauri command to exit the application
 #[tauri::command]
 pub fn exit_app(app_handle: tauri::AppHandle) {
+    // Tear down WebView windows before process exit. On Windows, calling exit while
+    // Chromium window classes are still registered logs:
+    // "Failed to unregister class Chrome_WidgetWin_0. Error = 1412"
+    let _ = close_overlay_window(app_handle.clone());
+
+    let labels: Vec<String> = app_handle
+        .webview_windows()
+        .into_keys()
+        .collect();
+
+    for label in labels {
+        if let Some(window) = app_handle.get_webview_window(&label) {
+            let _ = window.destroy();
+        }
+    }
+
     app_handle.exit(0);
 }

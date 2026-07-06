@@ -3,7 +3,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { TYPE_PROVIDER } from "@/types";
 
 import {
-
   appendUtteranceToGraph,
 
   applyMemoryToGraph,
@@ -13,6 +12,8 @@ import {
   extractMeetingMemory,
 
   getClientGraphContext,
+
+  getProviderApiKey,
 
   isKnowledgeConfigured,
 
@@ -33,6 +34,7 @@ import {
   SybillSyncResult,
 } from "@/lib/sybill";
 import { formatDialogueLine } from "@/lib/memory/dialogue";
+import { takeRecentDialogueLines } from "@/lib/memory/meeting-context";
 
 import { ClientGraphContext } from "@/lib/memory/types";
 
@@ -246,7 +248,7 @@ export function useMeetingMemory(ai: {
         setKnowledgeConfigured(configured);
         if (!configured) {
           setMemorySyncError(
-            "Neo4j not configured. Add NEO4J_* vars to src-tauri/.env and restart."
+            "Neo4j is not configured in this build."
           );
           return;
         }
@@ -256,6 +258,15 @@ export function useMeetingMemory(ai: {
       if (!ai.provider && !usePluelyApi) {
         setMemorySyncError(
           "Select a valid AI provider in Dev Space — memory sync needs it."
+        );
+        return;
+      }
+      if (
+        !usePluelyApi &&
+        !getProviderApiKey(ai.selectedProvider.variables)
+      ) {
+        setMemorySyncError(
+          "Add an API key in Dev Space → Chat AI (or the same provider under Speech-to-text / Whisper brain)."
         );
         return;
       }
@@ -431,7 +442,7 @@ export function useMeetingMemory(ai: {
     setKnowledgeConfigured(configured);
     if (!configured) {
       setSybillStatus(
-        "Neo4j not configured. Add NEO4J_* to src-tauri/.env and restart."
+        "Neo4j is not configured in this build."
       );
       return null;
     }
@@ -439,6 +450,14 @@ export function useMeetingMemory(ai: {
     if (!ai.provider) {
       setSybillStatus(
         "Select an AI provider in Dev Space — needed to summarize meetings."
+      );
+      return null;
+    }
+
+    const usePluelyApi = await shouldUsePluelyAPI();
+    if (!usePluelyApi && !getProviderApiKey(ai.selectedProvider.variables)) {
+      setSybillStatus(
+        "Add an API key in Dev Space → Chat AI (or matching STT / Whisper key)."
       );
       return null;
     }
@@ -494,11 +513,17 @@ export function useMeetingMemory(ai: {
     sybillAbortRef.current?.abort();
   }, []);
 
-  const getMeetingTranscriptForAsk = useCallback(() => {
+  const getRecentMeetingDialogue = useCallback(() => {
     const live = liveTranscriptSnapshotRef.current.trim();
-    const utterances = meetingUtterancesRef.current.join("\n").trim();
-    return live || utterances;
+    if (live) {
+      return takeRecentDialogueLines(live.split("\n"));
+    }
+    return takeRecentDialogueLines(meetingUtterancesRef.current);
   }, []);
+
+  const getMeetingTranscriptForAsk = useCallback(() => {
+    return getRecentMeetingDialogue();
+  }, [getRecentMeetingDialogue]);
 
   useEffect(() => {
     void refreshKnownClients();
@@ -549,6 +574,8 @@ export function useMeetingMemory(ai: {
     endGraphMeeting,
 
     getMeetingTranscriptForAsk,
+
+    getRecentMeetingDialogue,
 
     // Sybill sync
     sybillApiKey,

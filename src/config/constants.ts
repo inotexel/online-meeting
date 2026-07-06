@@ -1,3 +1,6 @@
+/** User-visible app name in the UI (not the internal package name). */
+export const APP_DISPLAY_NAME = "Closing Coach";
+
 // Storage keys
 export const STORAGE_KEYS = {
   THEME: "theme",
@@ -14,6 +17,7 @@ export const STORAGE_KEYS = {
   SYSTEM_AUDIO_QUICK_ACTIONS: "system_audio_quick_actions",
   CUSTOMIZABLE: "customizable",
   PLUELY_API_ENABLED: "pluely_api_enabled",
+  COACH_AI_SETTINGS: "coach_ai_settings",
   SHORTCUTS: "shortcuts",
   AUTOSTART_INITIALIZED: "autostart_initialized",
 

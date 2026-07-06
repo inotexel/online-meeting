@@ -55,6 +55,9 @@ interface LiveTranscriptProps {
 
   maxHeightClass?: string;
 
+  /** Title + caption only — no header bar, radio icon, or "Listening…" */
+  minimal?: boolean;
+
 }
 
 
@@ -110,6 +113,8 @@ export const LiveTranscript = ({
   displayMode = "caption",
 
   maxHeightClass = "max-h-64",
+
+  minimal = false,
 
 }: LiveTranscriptProps) => {
 
@@ -186,6 +191,36 @@ export const LiveTranscript = ({
     );
 
   };
+
+
+
+  if (minimal) {
+
+    return (
+
+      <div className="space-y-1.5">
+
+        <p className="text-sm font-medium text-foreground">{title}</p>
+
+        <div className="min-h-[2.5rem]">
+
+          {hasContent
+
+            ? renderLine(captionText, captionSpeaker, isCaptionPending)
+
+            : emptyMessage ? (
+
+                <p className="text-sm text-muted-foreground">{emptyMessage}</p>
+
+              ) : null}
+
+        </div>
+
+      </div>
+
+    );
+
+  }
 
 
 

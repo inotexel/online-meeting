@@ -34,8 +34,7 @@ export const ClientContextBar = ({
             : "rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"
         }
       >
-        Neo4j not configured. Add `NEO4J_URI` and `NEO4J_PASSWORD` to
-        `src-tauri/.env`, then restart the app.
+        Neo4j is not configured in this build. Contact your administrator.
       </div>
     );
   }

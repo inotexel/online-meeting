@@ -44,11 +44,7 @@ export function UpcomingCalendarMeetings({
             : "rounded-lg border border-border/50 bg-muted/20 p-2.5 text-xs text-muted-foreground"
         }
       >
-        Add <span className="font-mono">GOOGLE_CLIENT_ID</span> to{" "}
-        <span className="font-mono">src-tauri/.env</span> to enable Google
-        Calendar. Use redirect URI{" "}
-        <span className="font-mono">http://127.0.0.1:14528/callback</span> in
-        Google Cloud Console.
+        Google Calendar is not configured in this build.
       </div>
     );
   }

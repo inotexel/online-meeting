@@ -1,10 +1,20 @@
-/** True when the utterance should feed the prospect-only whisper coach. */
+export type DialogueSpeaker = "user" | "client";
+
+/** Map capture labels (user/seller/client/…) to coach dialogue roles. */
+export function normalizeDialogueSpeaker(
+  speakerLabel: string | null | undefined
+): DialogueSpeaker {
+  if (!speakerLabel) return "client";
+  const normalized = speakerLabel.trim().toLowerCase();
+  if (normalized === "user" || normalized === "seller") return "user";
+  return "client";
+}
+
+/** True when the utterance is from the prospect (client), not the seller. */
 export function isProspectUtterance(
   speakerLabel: string | null | undefined
 ): boolean {
-  if (!speakerLabel) return true;
-  const normalized = speakerLabel.trim().toLowerCase();
-  return normalized !== "user" && normalized !== "seller";
+  return normalizeDialogueSpeaker(speakerLabel) === "client";
 }
 
 /** Format a transcript line with User/Client speaker labels for coach and memory. */
