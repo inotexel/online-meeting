@@ -1,18 +1,18 @@
-export type OverlaySizeMode = "fit" | "original" | "fullscreen";
+export type OverlaySizeMode = "original" | "fullscreen";
 
 export const OVERLAY_SIZE_STORAGE_KEY = "pluely-overlay-size-mode";
 
-export const DEFAULT_OVERLAY_SIZE_MODE: OverlaySizeMode = "fit";
+export const DEFAULT_OVERLAY_SIZE_MODE: OverlaySizeMode = "original";
 
 export function loadOverlaySizeMode(): OverlaySizeMode {
   try {
     const stored = localStorage.getItem(OVERLAY_SIZE_STORAGE_KEY);
-    if (
-      stored === "fit" ||
-      stored === "original" ||
-      stored === "fullscreen"
-    ) {
+    if (stored === "original" || stored === "fullscreen") {
       return stored;
+    }
+    // Migrate removed "fit" mode to fullscreen
+    if (stored === "fit") {
+      return "fullscreen";
     }
   } catch {
     // ignore

@@ -15,6 +15,9 @@ const isAnyPopoverOpen = (): boolean => {
   if (document.body.dataset.pluelyCapturing === "true") {
     return true;
   }
+  if (document.body.dataset.pluelySpeechPanelOpen === "true") {
+    return true;
+  }
   if (
     document.querySelector('[data-slot="popover-content"][data-state="open"]')
   ) {
@@ -29,7 +32,7 @@ const isAnyPopoverOpen = (): boolean => {
 const toLayoutMode = (
   expanded: boolean,
   sizeMode: OverlaySizeMode
-): "compact" | "fit" | "original" | "fullscreen" => {
+): "compact" | "original" | "fullscreen" => {
   if (!expanded) {
     return "compact";
   }
