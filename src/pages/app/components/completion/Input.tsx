@@ -261,10 +261,13 @@ export const Input = ({
   keepEngaged,
   setKeepEngaged,
   meetingAskActive = false,
+  meetingAskCapturing = false,
   embedded = false,
 }: UseCompletionReturn & { isHidden: boolean; embedded?: boolean }) => {
   const placeholder = meetingAskActive
-    ? "Ask about this call, client, or what to say…"
+    ? meetingAskCapturing
+      ? "Ask about this call, client, or what to say…"
+      : "Ask about this client, cheat sheets, or prep for the call…"
     : "Ask me anything...";
 
   const showInlineResponse =

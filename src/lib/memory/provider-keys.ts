@@ -1,3 +1,6 @@
+import { STORAGE_KEYS } from "@/config";
+import { safeLocalStorage } from "@/lib";
+
 /** Extract API key from a provider's variable map (STT, AI, etc.). */
 export function getProviderApiKey(
   variables: Record<string, string>
@@ -21,6 +24,49 @@ export function resolveOpenAiEmbeddingKey(
   return (
     getProviderApiKey(sttVariables) || getProviderApiKey(aiVariables)
   );
+}
+
+/** Fresh STT key for live capture — reads storage so early system-audio events don't use a stale closure. */
+export function resolveTranscriptionApiKey(
+  sttVariables?: Record<string, string>,
+  options?: {
+    whisperApiKey?: string;
+    aiVariables?: Record<string, string>;
+  }
+): string {
+  const fromArgs = sttVariables ? getProviderApiKey(sttVariables) : "";
+  if (fromArgs) return fromArgs;
+
+  const whisperKey = options?.whisperApiKey?.trim() ?? "";
+  if (whisperKey) return whisperKey;
+
+  const fromAi = options?.aiVariables
+    ? getProviderApiKey(options.aiVariables)
+    : "";
+  if (fromAi) return fromAi;
+
+  try {
+    const savedStt = safeLocalStorage.getItem(STORAGE_KEYS.SELECTED_STT_PROVIDER);
+    if (savedStt) {
+      const parsed = JSON.parse(savedStt) as {
+        variables?: Record<string, string>;
+      };
+      const fromStorage = getProviderApiKey(parsed.variables ?? {});
+      if (fromStorage) return fromStorage;
+    }
+    const savedCoach = safeLocalStorage.getItem(STORAGE_KEYS.COACH_AI_SETTINGS);
+    if (savedCoach) {
+      const parsed = JSON.parse(savedCoach) as {
+        whisper?: { apiKey?: string };
+      };
+      const coachKey = parsed.whisper?.apiKey?.trim() ?? "";
+      if (coachKey) return coachKey;
+    }
+  } catch {
+    // ignore parse/storage errors
+  }
+
+  return "";
 }
 
 /** Chat / memory LLM config — use Chat AI key, else Whisper (same provider) or STT key. */

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::error::Error;
 use std::time::Duration;
+use tokio::time::sleep;
 
 #[derive(Clone)]
 pub struct Neo4jClient {
@@ -51,8 +52,8 @@ impl Neo4jClient {
             http_base,
             auth_header,
             http: Client::builder()
-                .connect_timeout(Duration::from_secs(15))
-                .timeout(Duration::from_secs(60))
+                .connect_timeout(Duration::from_secs(30))
+                .timeout(Duration::from_secs(90))
                 .build()
                 .map_err(|e| format!("Failed to create Neo4j HTTP client: {e}"))?,
             database,
@@ -65,6 +66,17 @@ impl Neo4jClient {
     }
 
     pub async fn run(&self, statement: &str, parameters: Value) -> Result<Value, String> {
+        match self.run_once(statement, parameters.clone()).await {
+            Ok(value) => Ok(value),
+            Err(err) if is_retryable_transport_error(&err) => {
+                sleep(Duration::from_secs(2)).await;
+                self.run_once(statement, parameters).await
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn run_once(&self, statement: &str, parameters: Value) -> Result<Value, String> {
         let url = format!(
             "{}/db/{}/query/v2",
             self.http_base.trim_end_matches('/'),
@@ -184,6 +196,16 @@ fn constraint_error_is_benign(err: &str) -> bool {
         || err.contains("An equivalent constraint already exists")
 }
 
+fn is_retryable_transport_error(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("deadline has elapsed")
+        || lower.contains("connection")
+        || lower.contains("connect")
+        || lower.contains("dns error")
+}
+
 fn format_neo4j_transport_error(err: reqwest::Error) -> String {
     let mut msg = format!("Neo4j HTTP request failed: {err}");
     let mut source = err.source();
@@ -231,6 +253,26 @@ mod tests {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UtteranceSnippet {
+    pub meeting_id: Option<String>,
+    pub speaker: Option<String>,
+    pub text: String,
+    pub sequence_num: Option<i64>,
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingSummarySnippet {
+    pub meeting_id: Option<String>,
+    pub number: Option<i64>,
+    pub title: Option<String>,
+    pub date: Option<String>,
+    pub summary: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientContext {
@@ -241,4 +283,7 @@ pub struct ClientContext {
     pub open_questions: Vec<String>,
     pub open_actions: Vec<String>,
     pub meeting_count: i64,
+    pub meeting_summaries: Vec<MeetingSummarySnippet>,
+    #[serde(default)]
+    pub recent_utterances: Vec<UtteranceSnippet>,
 }

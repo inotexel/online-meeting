@@ -8,15 +8,19 @@ import {
 
   buildDocSearchQuery,
 
-  filterRelevantDocChunks,
+  selectDocChunksForWhisper,
+
+  WHISPER_MIN_DOC_RELEVANCE_SCORE,
 
 } from "@/lib/memory/doc-search";
 
-import { searchClientDocuments } from "@/lib/memory/documents-api";
+import { searchClientDocumentsWithTimeout } from "@/lib/memory/documents-api";
+
+import { isCoachProviderReady } from "@/lib/storage/coach-ai-config";
 
 import { DialogueSpeaker } from "@/lib/memory/dialogue";
 
-import { MeetingAiContext } from "@/lib/memory/meeting-context";
+import { MeetingAiContext, mergeClientContextWithKnownClients, enrichClientContextForAi } from "@/lib/memory/meeting-context";
 
 import {
 
@@ -38,11 +42,60 @@ export interface VadWhisper {
 
   stage: string;
 
+  /** Client line → what to say next; user line → rephrase or emphasize. */
+  intent: "say_this" | "rephrase";
+
 }
 
 
 
 const WHISPER_DISMISS_MS = 18_000;
+
+/** Wait for VAD/STT to finish splitting one utterance before calling the brain. */
+const WHISPER_FEED_DEBOUNCE_MS = 2_500;
+
+/** Minimum gap between whispers shown in the UI. */
+const WHISPER_DISPLAY_COOLDOWN_MS = 12_000;
+
+/** Skip near-duplicate lines from repeated VAD segments. */
+const WHISPER_DEDUPE_WINDOW_MS = 45_000;
+
+interface ProcessedFeed {
+  speaker: DialogueSpeaker;
+  text: string;
+  at: number;
+}
+
+function normalizeFeedText(text: string): string {
+  return text.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function isNearDuplicateFeed(
+  speaker: DialogueSpeaker,
+  text: string,
+  recent: ProcessedFeed[]
+): boolean {
+  const normalized = normalizeFeedText(text);
+  if (!normalized) return true;
+
+  const now = Date.now();
+  for (const entry of recent) {
+    if (now - entry.at > WHISPER_DEDUPE_WINDOW_MS) continue;
+    if (entry.speaker !== speaker) continue;
+
+    const previous = normalizeFeedText(entry.text);
+    if (!previous) continue;
+    if (normalized === previous) return true;
+
+    const shorter =
+      normalized.length <= previous.length ? normalized : previous;
+    const longer =
+      normalized.length > previous.length ? normalized : previous;
+    if (shorter.length >= 24 && longer.includes(shorter)) return true;
+  }
+
+  return false;
+}
 
 
 
@@ -92,9 +145,10 @@ function recentDialogueExcludingLine(
 
 export function useVadWhisperCoach(ai: {
 
-  provider: TYPE_PROVIDER | undefined;
-
-  selectedProvider: { provider: string; variables: Record<string, string> };
+  resolveCoachProvider: () => {
+    provider: TYPE_PROVIDER | undefined;
+    selectedProvider: { provider: string; variables: Record<string, string> };
+  };
 
   clientContext: ClientGraphContext | null;
 
@@ -108,6 +162,16 @@ export function useVadWhisperCoach(ai: {
 
   getRecentMeetingDialogue: () => string;
 
+  refreshClientContext: () => Promise<ClientGraphContext | null>;
+
+  refreshKnownClients?: () => Promise<
+    { clientId: string; clientName: string; meetingCount: number }[]
+  >;
+
+  getActiveMeetingId: () => string;
+
+  knownClients?: { clientId: string; clientName: string; meetingCount: number }[];
+
 }) {
 
   const brainStateRef = useRef<WhisperBrainState>({ ...EMPTY_WHISPER_BRAIN_STATE });
@@ -117,6 +181,21 @@ export function useVadWhisperCoach(ai: {
   const dismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const brainQueueRef = useRef<Promise<void>>(Promise.resolve());
+
+  const feedDebounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
+
+  const pendingFeedRef = useRef<{
+    speaker: DialogueSpeaker;
+    line: string;
+  } | null>(null);
+
+  const recentlyProcessedRef = useRef<ProcessedFeed[]>([]);
+
+  const lastWhisperShownAtRef = useRef(0);
+
+  const processTokenRef = useRef(0);
 
 
 
@@ -168,6 +247,22 @@ export function useVadWhisperCoach(ai: {
 
     abortRef.current = null;
 
+    if (feedDebounceTimerRef.current) {
+
+      clearTimeout(feedDebounceTimerRef.current);
+
+      feedDebounceTimerRef.current = null;
+
+    }
+
+    pendingFeedRef.current = null;
+
+    recentlyProcessedRef.current = [];
+
+    lastWhisperShownAtRef.current = 0;
+
+    processTokenRef.current = 0;
+
     brainQueueRef.current = Promise.resolve();
 
     brainStateRef.current = { ...EMPTY_WHISPER_BRAIN_STATE };
@@ -192,19 +287,35 @@ export function useVadWhisperCoach(ai: {
 
   const processDialogueLine = useCallback(
 
-    async (speaker: DialogueSpeaker, line: string) => {
+    async (
+      speaker: DialogueSpeaker,
+      line: string,
+      processToken: number
+    ) => {
 
       const trimmed = line.trim();
 
       if (!trimmed) return;
 
+      if (isNearDuplicateFeed(speaker, trimmed, recentlyProcessedRef.current)) {
 
+        return;
 
-      if (!ai.provider) {
+      }
+
+      recentlyProcessedRef.current.push({
+        speaker,
+        text: trimmed,
+        at: Date.now(),
+      });
+
+      const { provider, selectedProvider } = ai.resolveCoachProvider();
+
+      if (!isCoachProviderReady(provider, selectedProvider)) {
 
         setCoachLastError(
 
-          "Select an AI provider in Dev Space — coach needs it for whispers."
+          "Add an OpenAI API key in Dev Space → STT (or Whisper AI) for coaching."
 
         );
 
@@ -242,13 +353,38 @@ export function useVadWhisperCoach(ai: {
 
       const abort = new AbortController();
 
+      abortRef.current?.abort();
+
       abortRef.current = abort;
 
 
 
       try {
 
-        let docChunks: Awaited<ReturnType<typeof searchClientDocuments>> = [];
+        let clientContext = ai.clientContext;
+        if (ai.knowledgeConfigured) {
+          try {
+            const knownClients =
+              (await ai.refreshKnownClients?.()) ?? ai.knownClients ?? [];
+            clientContext =
+              (await ai.refreshClientContext()) ?? ai.clientContext;
+            clientContext = mergeClientContextWithKnownClients(
+              clientContext,
+              ai.clientName,
+              ai.clientId,
+              knownClients
+            );
+            clientContext = await enrichClientContextForAi(
+              clientContext,
+              ai.clientId,
+              ai.clientName
+            );
+          } catch (error) {
+            console.warn("Whisper client context refresh skipped:", error);
+          }
+        }
+
+        let docChunks: Awaited<ReturnType<typeof searchClientDocumentsWithTimeout>> = [];
 
         const searchQuery = buildDocSearchQuery(
 
@@ -272,7 +408,7 @@ export function useVadWhisperCoach(ai: {
 
           try {
 
-            docChunks = await searchClientDocuments({
+            docChunks = await searchClientDocumentsWithTimeout({
 
               clientId: ai.clientId,
 
@@ -282,11 +418,13 @@ export function useVadWhisperCoach(ai: {
 
               limit: 5,
 
+              minScore: WHISPER_MIN_DOC_RELEVANCE_SCORE,
+
             });
 
           } catch (error) {
 
-            console.error("Whisper doc search failed:", error);
+            console.warn("Whisper doc search skipped:", error);
 
           }
 
@@ -294,7 +432,7 @@ export function useVadWhisperCoach(ai: {
 
 
 
-        const relevantDocChunks = filterRelevantDocChunks(
+        const relevantDocChunks = selectDocChunksForWhisper(
 
           docChunks.map((chunk) => ({
 
@@ -316,9 +454,11 @@ export function useVadWhisperCoach(ai: {
 
           recentDialogue,
 
-          clientContext: ai.knowledgeConfigured ? ai.clientContext : null,
+          clientContext: ai.knowledgeConfigured ? clientContext : null,
 
           docChunks: relevantDocChunks,
+
+          activeMeetingId: ai.getActiveMeetingId() || undefined,
 
         };
 
@@ -326,9 +466,9 @@ export function useVadWhisperCoach(ai: {
 
         const result = await runWhisperBrain({
 
-          provider: ai.provider,
+          provider,
 
-          selectedProvider: ai.selectedProvider,
+          selectedProvider,
 
           meetingContext,
 
@@ -370,6 +510,31 @@ export function useVadWhisperCoach(ai: {
 
 
 
+        if (processToken !== processTokenRef.current) {
+
+          setCoachStatus(`Listening · ${result.stage.replace(/_/g, " ")}`);
+
+          return;
+
+        }
+
+
+
+        const sinceLastWhisper = Date.now() - lastWhisperShownAtRef.current;
+
+        if (
+          lastWhisperShownAtRef.current > 0 &&
+          sinceLastWhisper < WHISPER_DISPLAY_COOLDOWN_MS
+        ) {
+
+          setCoachStatus(`Listening · ${result.stage.replace(/_/g, " ")}`);
+
+          return;
+
+        }
+
+
+
         if (!brainStateRef.current.whispers_given.includes(result.whisper)) {
 
           brainStateRef.current = {
@@ -398,7 +563,11 @@ export function useVadWhisperCoach(ai: {
 
           stage: result.stage,
 
+          intent: speaker === "user" ? "rephrase" : "say_this",
+
         });
+
+        lastWhisperShownAtRef.current = Date.now();
 
         scheduleDismiss();
 
@@ -430,13 +599,21 @@ export function useVadWhisperCoach(ai: {
 
       ai.getRecentMeetingDialogue,
 
+      ai.getActiveMeetingId,
+
       ai.knowledgeConfigured,
 
       ai.openaiApiKey,
 
-      ai.provider,
+      ai.refreshClientContext,
 
-      ai.selectedProvider,
+      ai.refreshKnownClients,
+
+      ai.knownClients,
+
+      ai.clientName,
+
+      ai.resolveCoachProvider,
 
       scheduleDismiss,
 
@@ -446,23 +623,71 @@ export function useVadWhisperCoach(ai: {
 
 
 
+  const flushPendingFeed = useCallback(() => {
+
+    const pending = pendingFeedRef.current;
+
+    pendingFeedRef.current = null;
+
+    if (!pending) return;
+
+    const token = ++processTokenRef.current;
+
+    brainQueueRef.current = brainQueueRef.current
+
+      .then(() => processDialogueLine(pending.speaker, pending.line, token))
+
+      .catch((error) => {
+
+        console.error("Whisper brain queue error:", error);
+
+      });
+
+  }, [processDialogueLine]);
+
+
+
   const feedDialogueLine = useCallback(
 
     (speaker: DialogueSpeaker, line: string) => {
 
-      brainQueueRef.current = brainQueueRef.current
+      const trimmed = line.trim();
 
-        .then(() => processDialogueLine(speaker, line))
+      if (!trimmed) return;
 
-        .catch((error) => {
+      const pending = pendingFeedRef.current;
 
-          console.error("Whisper brain queue error:", error);
+      if (pending) {
 
-        });
+        if (speaker === "client" || pending.speaker !== "client") {
+
+          pendingFeedRef.current = { speaker, line: trimmed };
+
+        }
+
+      } else {
+
+        pendingFeedRef.current = { speaker, line: trimmed };
+
+      }
+
+      if (feedDebounceTimerRef.current) {
+
+        clearTimeout(feedDebounceTimerRef.current);
+
+      }
+
+      feedDebounceTimerRef.current = setTimeout(() => {
+
+        feedDebounceTimerRef.current = null;
+
+        flushPendingFeed();
+
+      }, WHISPER_FEED_DEBOUNCE_MS);
 
     },
 
-    [processDialogueLine]
+    [flushPendingFeed]
 
   );
 
@@ -488,19 +713,15 @@ export function useVadWhisperCoach(ai: {
 
     getBrainState: () => brainStateRef.current,
 
-    coachBlockedReason: (!ai.knowledgeConfigured
-
-      ? "neo4j"
-
-      : !ai.clientName.trim()
-
-        ? "client_name"
-
-        : !ai.provider
-
-          ? "ai_provider"
-
-          : null) as CoachBlockedReason,
+    coachBlockedReason: (() => {
+      const { provider, selectedProvider } = ai.resolveCoachProvider();
+      if (!ai.knowledgeConfigured) return "neo4j" as CoachBlockedReason;
+      if (!ai.clientName.trim()) return "client_name" as CoachBlockedReason;
+      if (!isCoachProviderReady(provider, selectedProvider)) {
+        return "ai_provider" as CoachBlockedReason;
+      }
+      return null;
+    })(),
 
   };
 

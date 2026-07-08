@@ -17,6 +17,8 @@ fn bake_env(key: &str) {
 }
 
 fn main() {
+    println!("cargo:rerun-if-changed=.env");
+
     load_build_env();
 
     for key in [

@@ -109,6 +109,14 @@ export function useMeetingMemory(ai: {
   const abortRef = useRef<AbortController | null>(null);
   const liveTranscriptSnapshotRef = useRef("");
 
+  const resolveClientId = useCallback((): string => {
+    const trimmed = clientName.trim();
+    if (!trimmed) return "";
+    const id = slugifyClientId(trimmed);
+    clientIdRef.current = id;
+    return id;
+  }, [clientName]);
+
   const setClientName = useCallback((name: string) => {
 
     setClientNameState(name);
@@ -139,11 +147,26 @@ export function useMeetingMemory(ai: {
 
   const refreshClientContext = useCallback(async () => {
 
-    if (!knowledgeConfigured || !clientIdRef.current) return null;
+    const clientId = resolveClientId();
+
+    if (!clientId) {
+      setClientContext(null);
+      return null;
+    }
+
+    const configured = await isKnowledgeConfigured();
+
+    setKnowledgeConfigured(configured);
+
+    if (!configured) return null;
 
     try {
 
-      const context = await getClientGraphContext(clientIdRef.current);
+      const context = await getClientGraphContext(clientId, clientName.trim());
+
+      if (context.clientId) {
+        clientIdRef.current = context.clientId;
+      }
 
       setClientContext(context);
 
@@ -157,29 +180,7 @@ export function useMeetingMemory(ai: {
 
     }
 
-  }, [knowledgeConfigured]);
-
-
-
-  const testConnection = useCallback(async () => {
-
-    try {
-
-      const message = await testKnowledgeConnection();
-
-      setKnowledgeStatus("connected");
-
-      return message;
-
-    } catch (error) {
-
-      setKnowledgeStatus("error");
-
-      throw error;
-
-    }
-
-  }, []);
+  }, [resolveClientId, clientName]);
 
 
 
@@ -343,44 +344,55 @@ export function useMeetingMemory(ai: {
 
       if (!knowledgeConfigured || !graphMeetingIdRef.current) return;
 
+      const activeClientId =
+        clientIdRef.current || slugifyClientId(clientName.trim());
+      if (!activeClientId) return;
+
       try {
         await appendUtteranceToGraph({
-
+          clientId: activeClientId,
+          clientName: clientName.trim() || undefined,
           meetingId: graphMeetingIdRef.current,
-
           utteranceId: params.utteranceId,
-
           text: params.text,
-
           speakerLabel: params.speakerLabel,
-
           sequenceNum: params.sequenceNum,
-
         });
-
       } catch (error) {
-
         console.error("Failed to append utterance to graph:", error);
-
       }
-
     },
 
-    [knowledgeConfigured]
-
+    [knowledgeConfigured, clientName]
   );
 
 
 
-  const endGraphMeeting = useCallback(async () => {
+  const endGraphMeeting = useCallback(async (options?: { fallbackTranscript?: string }) => {
 
     if (!knowledgeConfigured || !graphMeetingIdRef.current) return;
+
+    let closingTranscript = meetingUtterancesRef.current.join("\n").trim();
+    if (!closingTranscript) {
+      closingTranscript = liveTranscriptSnapshotRef.current.trim();
+    }
+    if (!closingTranscript && options?.fallbackTranscript?.trim()) {
+      closingTranscript = options.fallbackTranscript.trim();
+    }
+
+    const closingSummary =
+      closingTranscript.length > 6000
+        ? closingTranscript.slice(-6000)
+        : closingTranscript;
 
     await syncMeetingMemory();
 
     try {
 
-      await endMeetingGraph(graphMeetingIdRef.current);
+      await endMeetingGraph(
+        graphMeetingIdRef.current,
+        closingSummary || undefined
+      );
 
     } catch (error) {
 
@@ -393,6 +405,7 @@ export function useMeetingMemory(ai: {
     transcriptBufferRef.current = [];
 
     meetingUtterancesRef.current = [];
+    liveTranscriptSnapshotRef.current = "";
 
     setMemorySyncError("");
   }, [knowledgeConfigured, syncMeetingMemory]);
@@ -401,15 +414,14 @@ export function useMeetingMemory(ai: {
 
   useEffect(() => {
 
-    if (clientName.trim()) {
-
-      clientIdRef.current = slugifyClientId(clientName);
-
-      refreshClientContext();
-
+    if (!clientName.trim()) {
+      setClientContext(null);
+      return;
     }
 
-  }, [clientName, refreshClientContext]);
+    void refreshClientContext();
+
+  }, [clientName, knowledgeConfigured, refreshClientContext]);
 
 
 
@@ -427,8 +439,23 @@ export function useMeetingMemory(ai: {
     }
     const clients = await listKnownClients();
     setKnownClients(clients);
+    if (clientName.trim()) {
+      await refreshClientContext();
+    }
     return clients;
-  }, []);
+  }, [clientName, refreshClientContext]);
+
+  const testConnection = useCallback(async () => {
+    try {
+      const message = await testKnowledgeConnection();
+      setKnowledgeStatus("connected");
+      await refreshKnownClients();
+      return message;
+    } catch (error) {
+      setKnowledgeStatus("error");
+      throw error;
+    }
+  }, [refreshKnownClients]);
 
   const runSybillSync = useCallback(async () => {
     if (sybillSyncing) return null;
@@ -513,6 +540,11 @@ export function useMeetingMemory(ai: {
     sybillAbortRef.current?.abort();
   }, []);
 
+  const getActiveMeetingId = useCallback(
+    () => graphMeetingIdRef.current,
+    []
+  );
+
   const getRecentMeetingDialogue = useCallback(() => {
     const live = liveTranscriptSnapshotRef.current.trim();
     if (live) {
@@ -576,6 +608,8 @@ export function useMeetingMemory(ai: {
     getMeetingTranscriptForAsk,
 
     getRecentMeetingDialogue,
+
+    getActiveMeetingId,
 
     // Sybill sync
     sybillApiKey,

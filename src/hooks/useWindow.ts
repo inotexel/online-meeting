@@ -98,25 +98,11 @@ export const useWindowResize = () => {
 
         setTimeout(() => {
           if (!isAnyPopoverOpen()) {
-            resizeWindow(false);
+            void resizeWindow(false);
           }
         }, 100);
       }
     };
-
-    const observer = new MutationObserver(() => {
-      if (!isAnyPopoverOpen()) {
-        resizeWindow(false);
-      }
-    });
-
-    // Observe the body for changes to detect popover open/close
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ["data-state"],
-    });
 
     document.addEventListener("mousedown", handleMouseDown);
     document.addEventListener("mouseup", handleMouseUp);
@@ -124,7 +110,6 @@ export const useWindowResize = () => {
     return () => {
       document.removeEventListener("mousedown", handleMouseDown);
       document.removeEventListener("mouseup", handleMouseUp);
-      observer.disconnect();
     };
   }, [resizeWindow]);
 

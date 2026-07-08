@@ -8,6 +8,8 @@ import {
   DEFAULT_QUICK_ACTIONS,
   DEFAULT_SYSTEM_PROMPT,
   STORAGE_KEYS,
+  buildHardcodedTranscriptionProvider,
+  HARDCODED_TRANSCRIPTION_PROVIDER_ID,
 } from "@/config";
 import {
   safeLocalStorage,
@@ -25,16 +27,26 @@ import {
 } from "@/lib/database";
 import { Message } from "@/types/completion";
 import { TYPE_PROVIDER } from "@/types/provider.type";
+import {
+  loadOutputDevices,
+  outputIdForCapture,
+  persistOutputSelection,
+  resolveOutputSelection,
+} from "@/lib/audio-devices";
 import { useMeetingMemory } from "./useMeetingMemory";
 import { useVadWhisperCoach } from "./useVadWhisperCoach";
 import { useCoachAiSettings } from "./useCoachAiSettings";
-import { buildCoachSelectedProvider } from "@/lib/storage/coach-ai-config";
+import { buildWhisperCoachProvider } from "@/lib/storage/coach-ai-config";
 import { formatDialogueLine, normalizeDialogueSpeaker } from "@/lib/memory/dialogue";
 import {
   ASK_MIN_DOC_RELEVANCE_SCORE,
   buildMeetingAskDocSearchQuery,
   buildChatAiSelectedProvider,
   resolveOpenAiEmbeddingKey,
+  resolveTranscriptionApiKey,
+  isKnowledgeConfigured,
+  mergeClientContextWithKnownClients,
+  enrichClientContextForAi,
   searchClientDocuments,
   selectDocChunksForAsk,
   streamMeetingAsk,
@@ -42,6 +54,8 @@ import {
 
 export type MeetingAskBridge = {
   active: boolean;
+  /** True while live capture is running — ask uses call dialogue + memory + docs. */
+  capturing?: boolean;
   streamAsk: (
     question: string,
     signal: AbortSignal
@@ -275,22 +289,13 @@ export function useSystemAudio() {
     allAiProviders,
     systemPrompt,
     selectedAudioDevices,
+    setSelectedAudioDevices,
   } = useApp();
 
   const aiProvider = allAiProviders.find(
     (p) => p.id === selectedAIProvider.provider
   );
   const { settings: coachAiSettings } = useCoachAiSettings();
-
-  const whisperAi = useMemo(
-    () =>
-      buildCoachSelectedProvider(
-        coachAiSettings.whisper,
-        allAiProviders,
-        selectedAIProvider
-      ),
-    [coachAiSettings.whisper, allAiProviders, selectedAIProvider]
-  );
 
   const chatAi = useMemo(
     () => ({
@@ -324,15 +329,34 @@ export function useSystemAudio() {
     openaiApiKey: embeddingApiKey,
   });
 
+  const resolveWhisperCoachProvider = useCallback(
+    () =>
+      buildWhisperCoachProvider(
+        coachAiSettings.whisper,
+        allAiProviders,
+        selectedAIProvider,
+        selectedSttProvider.variables
+      ),
+    [
+      coachAiSettings.whisper,
+      allAiProviders,
+      selectedAIProvider,
+      selectedSttProvider.variables,
+    ]
+  );
+
   const vadWhisperCoach = useVadWhisperCoach({
-    provider: whisperAi.provider,
-    selectedProvider: whisperAi.selectedProvider,
+    resolveCoachProvider: resolveWhisperCoachProvider,
     clientContext: meetingMemory.clientContext,
     clientId: meetingMemory.clientId,
     clientName: meetingMemory.clientName,
     knowledgeConfigured: meetingMemory.knowledgeConfigured,
     openaiApiKey: embeddingApiKey,
     getRecentMeetingDialogue: meetingMemory.getRecentMeetingDialogue,
+    refreshClientContext: meetingMemory.refreshClientContext,
+    refreshKnownClients: meetingMemory.refreshKnownClients,
+    getActiveMeetingId: meetingMemory.getActiveMeetingId,
+    knownClients: meetingMemory.knownClients,
   });
 
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -749,7 +773,7 @@ export function useSystemAudio() {
       try {
         speechUnlisten = await listen("speech-detected", async (event) => {
           try {
-            if (!capturing) return;
+            if (!capturingRef.current) return;
             const mode = getCaptureMode(vadConfig);
             if (mode === "realtime") return;
 
@@ -781,17 +805,30 @@ export function useSystemAudio() {
             const audioBlob = new Blob([bytes], { type: "audio/wav" });
 
             const usePluelyAPI = await shouldUsePluelyAPI();
-            if (!selectedSttProvider.provider && !usePluelyAPI) {
-              setError("No speech provider selected.");
+            const sttApiKey = resolveTranscriptionApiKey(
+              selectedSttProvider.variables,
+              {
+                whisperApiKey: coachAiSettings.whisper.apiKey,
+                aiVariables: selectedAIProvider.variables,
+              }
+            );
+
+            if (!usePluelyAPI && !sttApiKey) {
+              setError(
+                "OpenAI API key required for transcription. Add it in Dev Space → STT."
+              );
               return;
             }
 
+            const hardcodedSttProvider = buildHardcodedTranscriptionProvider(
+              sttApiKey
+            );
             const providerConfig = allSttProviders.find(
-              (p) => p.id === selectedSttProvider.provider
+              (p) => p.id === HARDCODED_TRANSCRIPTION_PROVIDER_ID
             );
 
             if (!providerConfig && !usePluelyAPI) {
-              setError("Speech provider config not found.");
+              setError("OpenAI Whisper provider config not found.");
               return;
             }
 
@@ -799,7 +836,7 @@ export function useSystemAudio() {
 
             const sttPromise = fetchSTT({
               provider: providerConfig,
-              selectedProvider: selectedSttProvider,
+              selectedProvider: hardcodedSttProvider,
               audio: audioBlob,
             });
 
@@ -882,7 +919,6 @@ export function useSystemAudio() {
       if (speechUnlisten) speechUnlisten();
     };
   }, [
-    capturing,
     selectedSttProvider,
     allSttProviders,
     conversation.messages.length,
@@ -891,16 +927,19 @@ export function useSystemAudio() {
     meetingMemory.appendUtterance,
     markSttStarted,
     markSttFinished,
+    coachAiSettings.whisper.apiKey,
+    selectedAIProvider.variables,
   ]);
 
   const buildCaptureInvokeArgs = useCallback(
-    (config: VadConfig) => {
+    (config: VadConfig, outputDeviceIdOverride?: string | null) => {
       const deviceId =
-        selectedAudioDevices.output.id !== "default"
-          ? selectedAudioDevices.output.id
-          : null;
+        outputDeviceIdOverride !== undefined
+          ? outputDeviceIdOverride
+          : outputIdForCapture(selectedAudioDevices.output.id);
 
       const inputDeviceId =
+        selectedAudioDevices.input.id &&
         selectedAudioDevices.input.id !== "default"
           ? selectedAudioDevices.input.id
           : null;
@@ -1279,7 +1318,32 @@ export function useSystemAudio() {
     try {
       setError("");
 
-      const hasAccess = await invoke<boolean>("check_system_audio_access");
+      let resolvedOutput = {
+        id: selectedAudioDevices.output.id,
+        name: selectedAudioDevices.output.name,
+      };
+      try {
+        const outputDevices = await loadOutputDevices();
+        const resolved = resolveOutputSelection(
+          outputDevices,
+          selectedAudioDevices.output
+        );
+        resolvedOutput = { id: resolved.id, name: resolved.name };
+        if (resolved.changed) {
+          setSelectedAudioDevices((prev) => ({
+            ...prev,
+            output: resolvedOutput,
+          }));
+          persistOutputSelection(resolvedOutput);
+        }
+      } catch (deviceErr) {
+        console.warn("Could not refresh output devices before capture:", deviceErr);
+      }
+
+      const deviceId = outputIdForCapture(resolvedOutput.id);
+      const hasAccess = await invoke<boolean>("check_system_audio_access", {
+        deviceId,
+      });
       if (!hasAccess) {
         setSetupRequired(true);
         setIsPopoverOpen(true);
@@ -1301,7 +1365,13 @@ export function useSystemAudio() {
       }
 
       if (isRealtime) {
-        const apiKey = getSttApiKey(selectedSttProvider.variables);
+        const apiKey = resolveTranscriptionApiKey(
+          selectedSttProvider.variables,
+          {
+            whisperApiKey: coachAiSettings.whisper.apiKey,
+            aiVariables: selectedAIProvider.variables,
+          }
+        );
         if (!apiKey) {
           setError(
             "OpenAI API key required. Configure it in Dev Space → STT provider."
@@ -1352,20 +1422,24 @@ export function useSystemAudio() {
         return;
       }
 
-      // VAD mode: Start recording immediately
+      // VAD: register meeting in Neo4j before capture so utterances link to the client.
       if (mode === "vad") {
         const sessionId = `vad_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
         vadSequenceRef.current = 0;
         vadWhisperCoach.reset();
-        await meetingMemory.refreshKnowledgeConfigured();
-        await meetingMemory.startGraphMeeting(sessionId);
+        try {
+          await meetingMemory.refreshKnowledgeConfigured();
+          await meetingMemory.startGraphMeeting(sessionId);
+        } catch (err) {
+          console.error("Failed to start Neo4j meeting graph:", err);
+        }
       }
 
       isRestartingCaptureRef.current = true;
       try {
         await invoke<string>("stop_system_audio_capture");
 
-        const { args } = buildCaptureInvokeArgs(activeConfig);
+        const { args } = buildCaptureInvokeArgs(activeConfig, deviceId);
         await invoke<string>("start_system_audio_capture", args);
       } finally {
         isRestartingCaptureRef.current = false;
@@ -1385,6 +1459,8 @@ export function useSystemAudio() {
     resizeWindow,
     vadWhisperCoach.reset,
     meetingMemory,
+    selectedAudioDevices.output,
+    setSelectedAudioDevices,
   ]);
 
   const stopCapture = useCallback(async () => {
@@ -1400,7 +1476,18 @@ export function useSystemAudio() {
       // Stop the audio capture
       await invoke<string>("stop_system_audio_capture");
 
-      await meetingMemory.endGraphMeeting();
+      const fallbackTranscript = [
+        ...vadSegments.map((segment) =>
+          formatDialogueLine(segment.speakerLabel, segment.text)
+        ),
+        ...realtimeSegments.map((segment) =>
+          formatDialogueLine(segment.speakerLabel, segment.text)
+        ),
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      await meetingMemory.endGraphMeeting({ fallbackTranscript });
       vadSequenceRef.current = 0;
       vadWhisperCoach.reset();
 
@@ -1429,7 +1516,13 @@ export function useSystemAudio() {
       console.error("Stop capture error:", err);
       isStoppingCaptureRef.current = false;
     }
-  }, [clearRealtimePending, meetingMemory, vadWhisperCoach.reset]);
+  }, [
+    clearRealtimePending,
+    meetingMemory,
+    vadWhisperCoach.reset,
+    vadSegments,
+    realtimeSegments,
+  ]);
 
   // Detect stalled transcription while UI still shows Stop
   useEffect(() => {
@@ -1835,20 +1928,34 @@ export function useSystemAudio() {
       if (!trimmed) return;
 
       const recentDialogue = meetingMemory.getRecentMeetingDialogue();
-      const clientContext = await meetingMemory.refreshClientContext();
+      const knownClients =
+        (await meetingMemory.refreshKnownClients()) ??
+        meetingMemory.knownClients;
+      let clientContext =
+        (await meetingMemory.refreshClientContext()) ??
+        meetingMemory.clientContext;
+      const clientId = meetingMemory.clientId;
+      clientContext = mergeClientContextWithKnownClients(
+        clientContext,
+        meetingMemory.clientName,
+        clientId,
+        knownClients
+      );
+      clientContext = await enrichClientContextForAi(
+        clientContext,
+        clientId,
+        meetingMemory.clientName
+      );
+      const configured =
+        (await isKnowledgeConfigured()) || meetingMemory.knowledgeConfigured;
 
       let docChunks: Awaited<ReturnType<typeof searchClientDocuments>> = [];
       const searchQuery = buildMeetingAskDocSearchQuery(trimmed, recentDialogue);
 
-      if (
-        meetingMemory.knowledgeConfigured &&
-        meetingMemory.clientId &&
-        embeddingApiKey &&
-        searchQuery
-      ) {
+      if (configured && clientId && embeddingApiKey && searchQuery) {
         try {
           docChunks = await searchClientDocuments({
-            clientId: meetingMemory.clientId,
+            clientId,
             query: searchQuery,
             openaiApiKey: embeddingApiKey,
             limit: 5,
@@ -1876,6 +1983,7 @@ export function useSystemAudio() {
           recentDialogue,
           clientContext: clientContext ?? meetingMemory.clientContext,
           docChunks: relevantDocChunks,
+          activeMeetingId: meetingMemory.getActiveMeetingId() || undefined,
         },
         signal,
       });

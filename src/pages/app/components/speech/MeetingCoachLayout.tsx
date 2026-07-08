@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { Switch } from "@/components";
 import { VadConfig, shouldCaptureUserMic } from "@/hooks/useSystemAudio";
+import type { VadWhisper } from "@/hooks/useVadWhisperCoach";
 import { KnownClient } from "@/lib/memory";
 import {
   SybillSyncProgress,
@@ -20,14 +21,9 @@ import { ClientContextBar } from "./ClientContextBar";
 import { ClientDocuments } from "./ClientDocuments";
 import { SybillSyncBar } from "./SybillSyncBar";
 import { UpcomingCalendarMeetings } from "./UpcomingCalendarMeetings";
+import { OutputDeviceSelect } from "./OutputDeviceSelect";
 
 type CoachBlockedReason = "neo4j" | "client_name" | "ai_provider" | null;
-
-interface VadWhisperView {
-  text: string;
-  why: string;
-  stage?: string;
-}
 
 interface MeetingCoachLayoutProps {
   captureMode: "vad" | "realtime";
@@ -41,21 +37,24 @@ interface MeetingCoachLayoutProps {
   realtimePendingSpeakerLabel?: string | null;
   vadSegments: LiveTranscriptSegment[];
   // Whisper coach
-  whisper: VadWhisperView | null;
+  whisper: VadWhisper | null;
   meetingStage: string;
   isThinking: boolean;
   isMemorySyncing: boolean;
+  isProcessing?: boolean;
   whisperBlockedReason?: CoachBlockedReason;
   whisperStatus: string;
   whisperError: string;
   // Client + memory
   meetingClientName: string;
+  meetingClientId?: string;
   onClientNameChange: (name: string) => void;
   knowledgeConfigured: boolean;
   knowledgeStatus: "unknown" | "connected" | "error";
   clientGraphContext: ClientGraphContext | null;
   knownClients: KnownClient[];
   onTestConnection: () => Promise<unknown>;
+  onRefreshKnownClients?: () => Promise<unknown>;
   openaiApiKey?: string;
   // Sybill
   sybillApiKey: string;
@@ -93,16 +92,19 @@ export function MeetingCoachLayout({
   meetingStage,
   isThinking,
   isMemorySyncing,
+  isProcessing = false,
   whisperBlockedReason,
   whisperStatus,
   whisperError,
   meetingClientName,
+  meetingClientId,
   onClientNameChange,
   knowledgeConfigured,
   knowledgeStatus,
   clientGraphContext,
   knownClients,
   onTestConnection,
+  onRefreshKnownClients,
   openaiApiKey,
   sybillApiKey,
   onSybillApiKeyChange,
@@ -181,6 +183,7 @@ export function MeetingCoachLayout({
         pendingSpeakerLabel={realtimePendingSpeakerLabel}
         isSessionActive={isRealtimeSessionActive}
         isCapturing={capturing}
+        isProcessing={isProcessing}
         showSpeakerLabels={!vadConfig.realtime_speaker_labels}
         speakerLabelsEnabled={Boolean(vadConfig.realtime_speaker_labels)}
         onSpeakerLabelsChange={(enabled) =>
@@ -197,9 +200,9 @@ export function MeetingCoachLayout({
         pendingDelta=""
         isSessionActive={capturing}
         isCapturing={capturing}
+        isProcessing={isProcessing}
         showSpeakerLabels
         displayMode="caption"
-        minimal
         title="Live transcript"
       />
     );
@@ -210,6 +213,11 @@ export function MeetingCoachLayout({
         Meeting prep
       </p>
       <div className="space-y-2">
+        <OutputDeviceSelect
+          disabled={setupDisabled}
+          capturing={capturing}
+          captureUserMic={captureUserMic}
+        />
         <CollapsibleCard
           title="Client"
           subtitle="Neo4j memory for this deal"
@@ -227,7 +235,10 @@ export function MeetingCoachLayout({
             knowledgeStatus={knowledgeStatus}
             onTestConnection={onTestConnection}
             meetingCount={clientGraphContext?.meetingCount}
+            recentUtteranceCount={clientGraphContext?.recentUtterances?.length}
+            resolvedGraphId={clientGraphContext?.clientId}
             knownClients={knownClients}
+            onRefreshClients={onRefreshKnownClients}
             disabled={setupDisabled}
           />
         </CollapsibleCard>
@@ -244,6 +255,7 @@ export function MeetingCoachLayout({
           <ClientDocuments
             embedded
             clientName={meetingClientName}
+            clientId={meetingClientId}
             openaiApiKey={openaiApiKey}
             knowledgeConfigured={knowledgeConfigured}
             disabled={setupDisabled}

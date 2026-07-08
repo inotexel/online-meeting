@@ -35,6 +35,8 @@ interface LiveTranscriptProps {
 
   isCapturing?: boolean;
 
+  isProcessing?: boolean;
+
   showSpeakerLabels?: boolean;
 
   speakerLabelsEnabled?: boolean;
@@ -95,6 +97,8 @@ export const LiveTranscript = ({
   isSessionActive,
 
   isCapturing = false,
+
+  isProcessing = false,
 
   showSpeakerLabels = false,
 
@@ -276,7 +280,13 @@ export const LiveTranscript = ({
 
           )}
 
-          {!readOnly && isSessionActive && (
+          {!readOnly && isProcessing && (
+            <span className="text-[9px] text-amber-600 font-medium whitespace-nowrap">
+              Transcribing…
+            </span>
+          )}
+
+          {!readOnly && !isProcessing && isSessionActive && (
 
             <span className="text-[9px] text-green-600 font-medium whitespace-nowrap">
 
@@ -302,7 +312,11 @@ export const LiveTranscript = ({
 
               {emptyMessage ??
 
-                (isSessionActive
+                (isProcessing
+
+                  ? "Transcribing speech…"
+
+                  : isSessionActive
 
                   ? "Waiting for speech from system audio…"
 

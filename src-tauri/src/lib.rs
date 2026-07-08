@@ -131,6 +131,7 @@ pub fn run() {
             knowledge::knowledge_append_utterance,
             knowledge::knowledge_apply_memory,
             knowledge::knowledge_get_client_context,
+            knowledge::knowledge_fetch_client_utterances,
             knowledge::knowledge_list_clients,
             knowledge::knowledge_sybill_meeting_exists,
             knowledge::knowledge_import_sybill_meeting,

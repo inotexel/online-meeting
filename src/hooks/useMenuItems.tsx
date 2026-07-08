@@ -13,6 +13,16 @@ import {
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 
+/** Sidebar entries hidden until re-enabled. */
+const HIDDEN_MENU_HREFS = new Set([
+  "/transcripts",
+  "/system-prompts",
+  "/responses",
+  "/screenshot",
+  "/audio",
+  "/shortcuts",
+]);
+
 export const useMenuItems = () => {
   const menu: {
     icon: React.ElementType;
@@ -70,7 +80,7 @@ export const useMenuItems = () => {
       label: "Dev space",
       href: "/dev-space",
     },
-  ];
+  ].filter((item) => !HIDDEN_MENU_HREFS.has(item.href));
 
   const footerItems = [
     {

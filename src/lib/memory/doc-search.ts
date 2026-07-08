@@ -1,10 +1,13 @@
 import { RetrievedDocChunk } from "./types";
 
-/** Cosine similarity floor for live whispers — below this, chunks are noise. */
+/** Strict floor for legacy coach paths that require high-confidence doc hits. */
 export const MIN_DOC_RELEVANCE_SCORE = 0.75;
 
-/** Looser floor when the seller explicitly asks about uploaded docs. */
-export const ASK_MIN_DOC_RELEVANCE_SCORE = 0.55;
+/** Looser floor for live whispers and meeting ask — rules docs often score lower. */
+export const WHISPER_MIN_DOC_RELEVANCE_SCORE = 0.55;
+
+/** @deprecated Use WHISPER_MIN_DOC_RELEVANCE_SCORE — kept as alias for meeting ask. */
+export const ASK_MIN_DOC_RELEVANCE_SCORE = WHISPER_MIN_DOC_RELEVANCE_SCORE;
 
 export function buildDocSearchQuery(transcript: string): string {
   const trimmed = transcript.trim();
@@ -48,10 +51,18 @@ export function buildMeetingAskDocSearchQuery(
 export function selectDocChunksForAsk(
   chunks: RetrievedDocChunk[]
 ): RetrievedDocChunk[] {
+  return selectDocChunksForWhisper(chunks);
+}
+
+/** Pick doc chunks for live whispers — thematic rules often sit below 0.75. */
+export function selectDocChunksForWhisper(
+  chunks: RetrievedDocChunk[],
+  fallbackCount = 3
+): RetrievedDocChunk[] {
   const filtered = filterRelevantDocChunks(
     chunks,
-    ASK_MIN_DOC_RELEVANCE_SCORE
+    WHISPER_MIN_DOC_RELEVANCE_SCORE
   );
   if (filtered.length > 0) return filtered;
-  return [...chunks].sort((a, b) => b.score - a.score).slice(0, 3);
+  return [...chunks].sort((a, b) => b.score - a.score).slice(0, fallbackCount);
 }

@@ -1,9 +1,140 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
   ClientGraphContext,
+  MeetingSummarySnippet,
   MemoryExtraction,
   MemoryTextItem,
+  UtteranceSnippet,
 } from "./types";
+function readString(
+  row: Record<string, unknown>,
+  camel: string,
+  snake: string
+): string {
+  const value = row[camel] ?? row[snake];
+  return typeof value === "string" ? value : "";
+}
+
+function readNumber(
+  row: Record<string, unknown>,
+  camel: string,
+  snake: string
+): number {
+  const value = row[camel] ?? row[snake];
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+function readOptionalNumber(
+  row: Record<string, unknown>,
+  camel: string,
+  snake: string
+): number | null {
+  const value = row[camel] ?? row[snake];
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function parseMeetingSummaries(raw: unknown): MeetingSummarySnippet[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((item) => {
+    const row =
+      item && typeof item === "object"
+        ? (item as Record<string, unknown>)
+        : {};
+    return {
+      meetingId: readString(row, "meetingId", "meeting_id") || readString(row, "id", "id") || null,
+      meetingNumber: typeof row.number === "number" ? row.number : null,
+      title: readString(row, "title", "title") || null,
+      meetingDate: readString(row, "date", "date") || null,
+      summary: readString(row, "summary", "summary") || null,
+    };
+  });
+}
+
+function parseUtteranceSnippets(raw: unknown): UtteranceSnippet[] {
+  if (!Array.isArray(raw)) return [];
+  const snippets: UtteranceSnippet[] = [];
+  for (const item of raw) {
+    const row =
+      item && typeof item === "object"
+        ? (item as Record<string, unknown>)
+        : {};
+    const text = readString(row, "text", "text");
+    if (!text) continue;
+    snippets.push({
+      meetingId: readString(row, "meetingId", "meeting_id") || null,
+      speaker: readString(row, "speaker", "speaker") || null,
+      text,
+      sequenceNum: readOptionalNumber(row, "sequenceNum", "sequence_num"),
+      createdAt: readString(row, "createdAt", "created_at") || null,
+    });
+  }
+  return snippets;
+}
+
+function parseClientGraphContext(
+  result: Record<string, unknown>,
+  fallbackId: string,
+  fallbackName?: string
+): ClientGraphContext {
+  return {
+    clientId: readString(result, "clientId", "client_id") || fallbackId,
+    clientName:
+      readString(result, "clientName", "client_name") ||
+      fallbackName?.trim() ||
+      fallbackId,
+    facts: Array.isArray(result.facts)
+      ? result.facts.map(String).filter(Boolean)
+      : [],
+    openObjections: Array.isArray(result.openObjections)
+      ? result.openObjections.map(String).filter(Boolean)
+      : Array.isArray(result.open_objections)
+        ? result.open_objections.map(String).filter(Boolean)
+        : [],
+    openQuestions: Array.isArray(result.openQuestions)
+      ? result.openQuestions.map(String).filter(Boolean)
+      : Array.isArray(result.open_questions)
+        ? result.open_questions.map(String).filter(Boolean)
+        : [],
+    openActions: Array.isArray(result.openActions)
+      ? result.openActions.map(String).filter(Boolean)
+      : Array.isArray(result.open_actions)
+        ? result.open_actions.map(String).filter(Boolean)
+        : [],
+    meetingCount: readNumber(result, "meetingCount", "meeting_count"),
+    meetingSummaries: parseMeetingSummaries(
+      result.meetingSummaries ?? result.meeting_summaries
+    ),
+    recentUtterances: parseUtteranceSnippets(
+      result.recentUtterances ?? result.recent_utterances
+    ),
+  };
+}
+
+export async function fetchClientUtterances(
+  clientId: string,
+  clientName?: string
+): Promise<UtteranceSnippet[]> {
+  try {
+    const result = await invoke<unknown>("knowledge_fetch_client_utterances", {
+      clientId,
+      clientName: clientName?.trim() ?? null,
+    });
+    return parseUtteranceSnippets(result);
+  } catch (error) {
+    console.error("fetchClientUtterances failed:", error);
+    return [];
+  }
+}
 
 export async function isKnowledgeConfigured(): Promise<boolean> {
   try {
@@ -44,6 +175,8 @@ export async function endMeetingGraph(
 }
 
 export async function appendUtteranceToGraph(params: {
+  clientId: string;
+  clientName?: string;
   meetingId: string;
   utteranceId: string;
   text: string;
@@ -52,6 +185,8 @@ export async function appendUtteranceToGraph(params: {
 }): Promise<void> {
   await invoke("knowledge_append_utterance", {
     input: {
+      clientId: params.clientId,
+      clientName: params.clientName ?? null,
       meetingId: params.meetingId,
       utteranceId: params.utteranceId,
       text: params.text,
@@ -109,37 +244,31 @@ export async function applyMemoryToGraph(
 }
 
 export async function getClientGraphContext(
-  clientId: string
+  clientId: string,
+  clientName?: string
 ): Promise<ClientGraphContext> {
   try {
-    const result = await invoke<{
-      client_id: string;
-      client_name: string;
-      facts: string[];
-      open_objections: string[];
-      open_questions: string[];
-      open_actions: string[];
-      meeting_count: number;
-    }>("knowledge_get_client_context", { clientId });
+    const result = await invoke<Record<string, unknown>>(
+      "knowledge_get_client_context",
+      {
+        clientId,
+        clientName: clientName?.trim() ?? null,
+      }
+    );
 
-    return {
-      clientId: result.client_id,
-      clientName: result.client_name,
-      facts: result.facts ?? [],
-      openObjections: result.open_objections ?? [],
-      openQuestions: result.open_questions ?? [],
-      openActions: result.open_actions ?? [],
-      meetingCount: result.meeting_count ?? 0,
-    };
-  } catch {
+    return parseClientGraphContext(result, clientId, clientName);
+  } catch (error) {
+    console.error("getClientGraphContext failed:", error);
     return {
       clientId,
-      clientName: clientId,
+      clientName: clientName?.trim() || clientId,
       facts: [],
       openObjections: [],
       openQuestions: [],
       openActions: [],
       meetingCount: 0,
+      meetingSummaries: [],
+      recentUtterances: [],
     };
   }
 }
@@ -152,14 +281,16 @@ export interface KnownClient {
 
 export async function listKnownClients(): Promise<KnownClient[]> {
   try {
-    const result = await invoke<
-      { client_id: string; client_name: string; meeting_count: number }[]
-    >("knowledge_list_clients");
-    return (result ?? []).map((row) => ({
-      clientId: row.client_id,
-      clientName: row.client_name,
-      meetingCount: row.meeting_count ?? 0,
-    }));
+    const result = await invoke<Record<string, unknown>[]>(
+      "knowledge_list_clients"
+    );
+    return (result ?? [])
+      .map((row) => ({
+        clientId: readString(row, "clientId", "client_id"),
+        clientName: readString(row, "clientName", "client_name"),
+        meetingCount: readNumber(row, "meetingCount", "meeting_count"),
+      }))
+      .filter((row) => row.clientId.length > 0);
   } catch {
     return [];
   }

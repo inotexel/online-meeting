@@ -1067,5 +1067,6 @@ export const useCompletion = (options?: {
     keepEngaged,
     setKeepEngaged,
     meetingAskActive: options?.meetingAsk?.active === true,
+    meetingAskCapturing: options?.meetingAsk?.capturing === true,
   };
 };

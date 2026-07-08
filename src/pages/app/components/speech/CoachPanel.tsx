@@ -1,13 +1,8 @@
 import { CoachSuggestion } from "@/lib/memory";
+import type { VadWhisper } from "@/hooks/useVadWhisperCoach";
 import { FileTextIcon, LoaderIcon, LightbulbIcon } from "lucide-react";
 
 type CoachBlockedReason = "neo4j" | "client_name" | "ai_provider" | null;
-
-interface VadWhisperView {
-  text: string;
-  why: string;
-  stage?: string;
-}
 
 interface CoachPanelProps {
   suggestions: CoachSuggestion[];
@@ -17,7 +12,7 @@ interface CoachPanelProps {
   lastError?: string;
   /** VAD auto-detect whisper mode — one suggestion at a time */
   whisperMode?: boolean;
-  whisper?: VadWhisperView | null;
+  whisper?: VadWhisper | null;
   meetingStage?: string;
   /** Tighter padding when nested inside a collapsible idle state */
   compact?: boolean;
@@ -38,7 +33,7 @@ const blockedMessages: Record<Exclude<CoachBlockedReason, null>, string> = {
   client_name:
     "Enter a client name before starting capture — memory and coach need it.",
   ai_provider:
-    "Select an AI provider in Dev Space — coach uses it for suggestions.",
+    "Add an OpenAI API key in Dev Space → STT (or Whisper AI) for coaching.",
 };
 
 function DocSourceBlock({ item }: { item: CoachSuggestion }) {
@@ -121,7 +116,7 @@ export const CoachPanel = ({
           {whisper ? (
             <div className="rounded-lg border border-primary/30 bg-primary/5 p-3 space-y-2 animate-in fade-in slide-in-from-bottom-2 duration-300">
               <p className="text-[11px] font-semibold uppercase tracking-wide text-primary">
-                Say this
+                {whisper.intent === "rephrase" ? "Say this instead" : "Say this"}
               </p>
               <p className="text-base leading-relaxed font-medium">
                 {whisper.text}

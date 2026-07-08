@@ -1,7 +1,14 @@
 import { STORAGE_KEYS } from "@/config";
+import { AI_PROVIDERS } from "@/config/ai-providers.constants";
 import { getDefaultModelForProvider } from "@/config/llm-models.constants";
 import { safeLocalStorage } from "@/lib";
+import {
+  getProviderApiKey,
+  resolveTranscriptionApiKey,
+} from "@/lib/memory/provider-keys";
 import { TYPE_PROVIDER } from "@/types";
+
+const DEFAULT_WHISPER_COACH_PROVIDER_ID = "openai";
 
 export const COACH_AI_SETTINGS_CHANGED_EVENT = "coach-ai-settings-changed";
 
@@ -103,4 +110,67 @@ export function buildCoachSelectedProvider(
       variables,
     },
   };
+}
+
+/** Whisper coach — reuse Dev Space whisper config, else main AI / STT OpenAI key. */
+export function buildWhisperCoachProvider(
+  role: CoachAiRoleConfig,
+  allProviders: TYPE_PROVIDER[],
+  fallback: { provider: string; variables: Record<string, string> },
+  sttVariables?: Record<string, string>
+): {
+  provider: TYPE_PROVIDER | undefined;
+  selectedProvider: { provider: string; variables: Record<string, string> };
+} {
+  const base = buildCoachSelectedProvider(role, allProviders, fallback);
+  if (base.provider && getProviderApiKey(base.selectedProvider.variables)) {
+    return base;
+  }
+
+  const apiKey = resolveTranscriptionApiKey(sttVariables, {
+    whisperApiKey: role.apiKey,
+    aiVariables: fallback.variables,
+  });
+
+  if (!apiKey) {
+    return base;
+  }
+
+  const providerId =
+    base.selectedProvider.provider ||
+    role.providerId ||
+    fallback.provider ||
+    DEFAULT_WHISPER_COACH_PROVIDER_ID;
+
+  const provider =
+    allProviders.find((p) => p.id === providerId) ||
+    allProviders.find((p) => p.id === DEFAULT_WHISPER_COACH_PROVIDER_ID) ||
+    AI_PROVIDERS.find((p) => p.id === DEFAULT_WHISPER_COACH_PROVIDER_ID);
+
+  const resolvedId = provider?.id ?? providerId;
+  const model =
+    base.selectedProvider.variables.model ||
+    role.model ||
+    getDefaultModelForProvider(resolvedId);
+
+  return {
+    provider,
+    selectedProvider: {
+      provider: resolvedId,
+      variables: {
+        api_key: apiKey,
+        model,
+      },
+    },
+  };
+}
+
+export function isCoachProviderReady(
+  provider: TYPE_PROVIDER | undefined,
+  selectedProvider: { provider: string; variables: Record<string, string> }
+): boolean {
+  return Boolean(
+    getProviderApiKey(selectedProvider.variables) &&
+      (provider || selectedProvider.provider)
+  );
 }

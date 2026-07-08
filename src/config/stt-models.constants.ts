@@ -1,5 +1,22 @@
 import { ModelCatalog, ModelOption } from "./model-catalog.types";
 
+/** Fixed batch transcription for live capture (VAD / continuous). */
+export const HARDCODED_TRANSCRIPTION_PROVIDER_ID = "openai-whisper";
+export const HARDCODED_TRANSCRIPTION_MODEL = "whisper-1";
+
+export function buildHardcodedTranscriptionProvider(apiKey: string): {
+  provider: string;
+  variables: Record<string, string>;
+} {
+  return {
+    provider: HARDCODED_TRANSCRIPTION_PROVIDER_ID,
+    variables: {
+      api_key: apiKey.trim(),
+      model: HARDCODED_TRANSCRIPTION_MODEL,
+    },
+  };
+}
+
 /** Exact transcription model IDs per built-in STT provider. */
 export const STT_MODELS_BY_PROVIDER: Record<string, ModelOption[]> = {
   "openai-whisper": [
@@ -52,6 +69,9 @@ export function hasSttCuratedModelList(providerId: string): boolean {
 }
 
 export function getDefaultSttModelForProvider(providerId: string): string {
+  if (providerId === HARDCODED_TRANSCRIPTION_PROVIDER_ID) {
+    return HARDCODED_TRANSCRIPTION_MODEL;
+  }
   const models = getSttModelsForProvider(providerId);
   return models[0]?.id ?? "";
 }

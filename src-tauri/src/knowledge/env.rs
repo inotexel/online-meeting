@@ -3,6 +3,19 @@ use std::sync::Once;
 
 static DOTENV_LOADED: Once = Once::new();
 
+fn load_env_file(path: &str) -> bool {
+    let Ok(iter) = dotenv::from_path_iter(path) else {
+        return false;
+    };
+
+    let mut loaded = false;
+    for item in iter.flatten() {
+        std::env::set_var(&item.0, &item.1);
+        loaded = true;
+    }
+    loaded
+}
+
 pub fn load_dotenv() {
     DOTENV_LOADED.call_once(|| {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -15,12 +28,16 @@ pub fn load_dotenv() {
         ];
 
         for path in &candidates {
-            if std::path::Path::new(path).is_file() && dotenv::from_path(path).is_ok() {
+            if std::path::Path::new(path).is_file() && load_env_file(path) {
                 return;
             }
         }
 
-        dotenv::dotenv().ok();
+        if let Ok(iter) = dotenv::dotenv_iter() {
+            for item in iter.flatten() {
+                std::env::set_var(&item.0, &item.1);
+            }
+        }
     });
 }
 

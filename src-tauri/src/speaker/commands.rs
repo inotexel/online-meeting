@@ -728,8 +728,8 @@ pub async fn manual_stop_continuous(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn check_system_audio_access(_app: AppHandle) -> Result<bool, String> {
-    match SpeakerInput::new() {
+pub fn check_system_audio_access(device_id: Option<String>) -> Result<bool, String> {
+    match SpeakerInput::new_with_device(device_id) {
         Ok(_) => Ok(true),
         Err(e) => {
             error!("System audio access check failed: {}", e);

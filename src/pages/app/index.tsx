@@ -28,6 +28,7 @@ const App = () => {
 
   const meetingAsk = {
     active: Boolean(systemAudio?.meetingAskActive),
+    capturing: Boolean(systemAudio?.capturing),
     streamAsk: systemAudio.streamMeetingAskQuestion,
   };
   const showCompletionBar = !systemAudio?.isPopoverOpen;

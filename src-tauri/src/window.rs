@@ -108,6 +108,9 @@ pub fn set_overlay_layout(
     match mode.as_str() {
         "compact" => {
             window
+                .set_resizable(false)
+                .map_err(|e| format!("Failed to lock window resize: {}", e))?;
+            window
                 .set_size(Size::Logical(LogicalSize::new(
                     ORIGINAL_OVERLAY_WIDTH,
                     COMPACT_OVERLAY_HEIGHT,
@@ -121,6 +124,9 @@ pub fn set_overlay_layout(
                 .map(|h| h as f64)
                 .unwrap_or(DEFAULT_EXPANDED_HEIGHT);
             window
+                .set_resizable(true)
+                .map_err(|e| format!("Failed to enable window resize: {}", e))?;
+            window
                 .set_size(Size::Logical(LogicalSize::new(
                     ORIGINAL_OVERLAY_WIDTH,
                     expanded_height,
@@ -133,6 +139,9 @@ pub fn set_overlay_layout(
             let monitor = active_monitor(&window)?;
             let monitor_size = monitor.size();
             let monitor_position = monitor.position();
+            window
+                .set_resizable(true)
+                .map_err(|e| format!("Failed to enable window resize: {}", e))?;
             window
                 .set_size(Size::Physical(PhysicalSize::new(
                     monitor_size.width,
