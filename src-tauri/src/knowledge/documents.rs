@@ -308,7 +308,7 @@ pub async fn search_client_documents(
     }
 
     let neo = Neo4jClient::from_env()?;
-    ensure_document_schema(&neo).await?;
+    // Schema is ensured on connection test / document ingest — skip on hot search path.
 
     let query_vector = embed_query(openai_api_key, trimmed).await?;
     let top_k = (limit * 4).max(12);

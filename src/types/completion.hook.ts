@@ -130,8 +130,10 @@ export interface UseCompletionReturn {
   captureScreenshot: () => Promise<void>;
   /** Whether a screenshot is currently loading */
   isScreenshotLoading: boolean;
-  /** True during live meeting capture — routes ask to meeting brain */
+  /** True when client + Neo4j ready — routes ask to meeting brain */
   meetingAskActive?: boolean;
+  /** True during live capture — meeting ask includes call dialogue */
+  meetingAskCapturing?: boolean;
 }
 
 /**

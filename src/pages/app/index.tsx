@@ -1,4 +1,4 @@
-import { Card, Updater, DragButton, CustomCursor, Button } from "@/components";
+import { Card, DragButton, CustomCursor, Button } from "@/components";
 import {
   SystemAudio,
   Completion,
@@ -28,6 +28,7 @@ const App = () => {
 
   const meetingAsk = {
     active: Boolean(systemAudio?.meetingAskActive),
+    capturing: Boolean(systemAudio?.capturing),
     streamAsk: systemAudio.streamMeetingAskQuestion,
   };
   const showCompletionBar = !systemAudio?.isPopoverOpen;
@@ -71,16 +72,15 @@ const App = () => {
           >
             <Completion isHidden={isHidden} meetingAsk={meetingAsk} />
             <Button
-              size={"icon"}
+              size="icon"
               className="cursor-pointer"
-              title="Open Dev Space"
+              title="Open Dashboard"
               onClick={openDashboard}
             >
               <SparklesIcon className="h-4 w-4" />
             </Button>
           </div>
 
-          <Updater />
           <DragButton />
         </Card>
         {customizable.cursor.type === "invisible" && platform !== "linux" ? (

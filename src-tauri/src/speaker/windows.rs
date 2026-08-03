@@ -8,7 +8,11 @@ use std::task::{Poll, Waker};
 use std::thread;
 use std::time::Duration;
 use tracing::error;
-use wasapi::{get_default_device, DeviceCollection, Direction, SampleType, StreamMode, WaveFormat};
+use wasapi::{
+    get_default_device, get_default_device_for_role, DeviceCollection, Direction, Role, SampleType,
+    StreamMode, WaveFormat,
+};
+use tracing::info;
 
 pub fn get_input_devices() -> Result<Vec<AudioDevice>> {
     let mut devices = Vec::new();
@@ -107,6 +111,47 @@ fn find_device_by_id(direction: &Direction, device_id: &str) -> Option<wasapi::D
     None
 }
 
+fn resolve_loopback_device(device_id: Option<&str>) -> Result<wasapi::Device> {
+    if let Some(id) = device_id.filter(|id| !id.is_empty() && *id != "default") {
+        if let Some(device) = find_device_by_id(&Direction::Render, id) {
+            let name = device
+                .get_friendlyname()
+                .unwrap_or_else(|_| "unknown".to_string());
+            info!("Pluely loopback using selected output device: {}", name);
+            return Ok(device);
+        }
+        error!(
+            "[resolve_loopback_device] Selected device {} not found; using Windows default",
+            id
+        );
+    }
+
+    let device = get_default_device(&Direction::Render)?;
+    let name = device
+        .get_friendlyname()
+        .unwrap_or_else(|_| "unknown".to_string());
+    info!("Pluely loopback using console default: {}", name);
+    Ok(device)
+}
+
+fn communications_loopback_fallback() -> Option<wasapi::Device> {
+    let console = get_default_device(&Direction::Render).ok()?;
+    let console_id = console.get_id().ok()?;
+    let comm = get_default_device_for_role(&Direction::Render, &Role::Communications).ok()?;
+    let comm_id = comm.get_id().ok()?;
+    if comm_id == console_id {
+        return None;
+    }
+    let comm_name = comm
+        .get_friendlyname()
+        .unwrap_or_else(|_| "unknown".to_string());
+    info!(
+        "Pluely loopback retrying with communications default: {}",
+        comm_name
+    );
+    Some(comm)
+}
+
 pub struct SpeakerInput {
     device_id: Option<String>,
 }
@@ -186,39 +231,47 @@ impl SpeakerStream {
         device_id: Option<String>,
     ) -> Result<()> {
         let init_result = (|| -> Result<_> {
-            let device = match device_id {
-                Some(ref id) => match find_device_by_id(&Direction::Render, id) {
-                    Some(d) => d,
-                    None => {
-                        get_default_device(&Direction::Render).expect("No default render device")
+            let try_open = |device: wasapi::Device| -> Result<_> {
+                let mut audio_client = device.get_iaudioclient()?;
+                let device_format = audio_client.get_mixformat()?;
+                let actual_rate = device_format.get_samplespersec();
+                let desired_format = WaveFormat::new(
+                    32,
+                    32,
+                    &SampleType::Float,
+                    actual_rate as usize,
+                    1,
+                    None,
+                );
+                let (_def_time, min_time) = audio_client.get_device_period()?;
+                let mode = StreamMode::EventsShared {
+                    autoconvert: true,
+                    buffer_duration_hns: min_time,
+                };
+                audio_client.initialize_client(&desired_format, &Direction::Capture, &mode)?;
+                let h_event = audio_client.set_get_eventhandle()?;
+                let render_client = audio_client.get_audiocaptureclient()?;
+                audio_client.start_stream()?;
+                Ok((h_event, render_client, actual_rate))
+            };
+
+            let primary = resolve_loopback_device(device_id.as_deref())?;
+            match try_open(primary) {
+                Ok(stream) => Ok(stream),
+                Err(primary_err) => {
+                    if let Some(fallback) = communications_loopback_fallback() {
+                        try_open(fallback).map_err(|fallback_err| {
+                            anyhow::anyhow!(
+                                "loopback init failed (primary: {}; communications fallback: {})",
+                                primary_err,
+                                fallback_err
+                            )
+                        })
+                    } else {
+                        Err(primary_err)
                     }
-                },
-                None => get_default_device(&Direction::Render)?,
-            };
-
-            let mut audio_client = device.get_iaudioclient()?;
-
-            let device_format = audio_client.get_mixformat()?;
-            let actual_rate = device_format.get_samplespersec();
-
-            let desired_format =
-                WaveFormat::new(32, 32, &SampleType::Float, actual_rate as usize, 1, None);
-
-            let (_def_time, min_time) = audio_client.get_device_period()?;
-
-            let mode = StreamMode::EventsShared {
-                autoconvert: true,
-                buffer_duration_hns: min_time,
-            };
-
-            audio_client.initialize_client(&desired_format, &Direction::Capture, &mode)?;
-
-            let h_event = audio_client.set_get_eventhandle()?;
-            let render_client = audio_client.get_audiocaptureclient()?;
-
-            audio_client.start_stream()?;
-
-            Ok((h_event, render_client, actual_rate))
+                }
+            }
         })();
 
         match init_result {

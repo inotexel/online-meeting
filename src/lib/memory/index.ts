@@ -6,5 +6,6 @@ export * from "./documents-api";
 export * from "./extract-memory";
 export * from "./coach";
 export * from "./coach-doc-provenance";
+export * from "./meeting-context";
 export * from "./whisper-brain";
 export * from "./meeting-ask-brain";

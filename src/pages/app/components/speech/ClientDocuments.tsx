@@ -12,6 +12,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 interface ClientDocumentsProps {
   clientName: string;
+  clientId?: string;
   openaiApiKey?: string;
   knowledgeConfigured: boolean;
   disabled?: boolean;
@@ -20,6 +21,7 @@ interface ClientDocumentsProps {
 
 export const ClientDocuments = ({
   clientName,
+  clientId: clientIdProp,
   openaiApiKey,
   knowledgeConfigured,
   disabled = false,
@@ -31,7 +33,9 @@ export const ClientDocuments = ({
   const [error, setError] = useState("");
 
   const trimmedName = clientName.trim();
-  const clientId = trimmedName ? slugifyClientId(trimmedName) : "";
+  const clientId =
+    clientIdProp?.trim() ||
+    (trimmedName ? slugifyClientId(trimmedName) : "");
 
   useEffect(() => {
     if (!knowledgeConfigured || !clientId) {

@@ -1,8 +1,13 @@
-use super::env::{load_dotenv, neo4j_env_ready};
+use super::env::{
+    load_dotenv, neo4j_database, neo4j_env_ready, neo4j_password, neo4j_uri, neo4j_user,
+};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::error::Error;
+use std::time::Duration;
+use tokio::time::sleep;
 
 #[derive(Clone)]
 pub struct Neo4jClient {
@@ -32,12 +37,12 @@ struct QueryData {
 impl Neo4jClient {
     pub fn from_env() -> Result<Self, String> {
         load_dotenv();
-        let uri = std::env::var("NEO4J_URI")
-            .map_err(|_| "NEO4J_URI is not set in src-tauri/.env".to_string())?;
-        let user = std::env::var("NEO4J_USER").unwrap_or_else(|_| "neo4j".to_string());
-        let password = std::env::var("NEO4J_PASSWORD")
-            .map_err(|_| "NEO4J_PASSWORD is not set in src-tauri/.env".to_string())?;
-        let database = std::env::var("NEO4J_DATABASE").unwrap_or_else(|_| "neo4j".to_string());
+        let uri = neo4j_uri()
+            .ok_or_else(|| "Neo4j is not configured in this build.".to_string())?;
+        let user = neo4j_user().unwrap_or_else(|| "neo4j".to_string());
+        let password = neo4j_password()
+            .ok_or_else(|| "Neo4j is not configured in this build.".to_string())?;
+        let database = neo4j_database().unwrap_or_else(|| "neo4j".to_string());
 
         let http_base = bolt_uri_to_https(&uri);
         let token = B64.encode(format!("{user}:{password}"));
@@ -46,7 +51,11 @@ impl Neo4jClient {
         Ok(Self {
             http_base,
             auth_header,
-            http: Client::new(),
+            http: Client::builder()
+                .connect_timeout(Duration::from_secs(30))
+                .timeout(Duration::from_secs(90))
+                .build()
+                .map_err(|e| format!("Failed to create Neo4j HTTP client: {e}"))?,
             database,
         })
     }
@@ -57,6 +66,17 @@ impl Neo4jClient {
     }
 
     pub async fn run(&self, statement: &str, parameters: Value) -> Result<Value, String> {
+        match self.run_once(statement, parameters.clone()).await {
+            Ok(value) => Ok(value),
+            Err(err) if is_retryable_transport_error(&err) => {
+                sleep(Duration::from_secs(2)).await;
+                self.run_once(statement, parameters).await
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn run_once(&self, statement: &str, parameters: Value) -> Result<Value, String> {
         let url = format!(
             "{}/db/{}/query/v2",
             self.http_base.trim_end_matches('/'),
@@ -74,7 +94,7 @@ impl Neo4jClient {
             }))
             .send()
             .await
-            .map_err(|e| format!("Neo4j HTTP request failed: {e}"))?;
+            .map_err(format_neo4j_transport_error)?;
 
         let status = response.status();
         let body: QueryResponse = response
@@ -176,6 +196,30 @@ fn constraint_error_is_benign(err: &str) -> bool {
         || err.contains("An equivalent constraint already exists")
 }
 
+fn is_retryable_transport_error(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("deadline has elapsed")
+        || lower.contains("connection")
+        || lower.contains("connect")
+        || lower.contains("dns error")
+}
+
+fn format_neo4j_transport_error(err: reqwest::Error) -> String {
+    let mut msg = format!("Neo4j HTTP request failed: {err}");
+    let mut source = err.source();
+    while let Some(cause) = source {
+        msg.push_str(&format!(" ({cause})"));
+        source = cause.source();
+    }
+    msg.push_str(
+        ". Check that your Aura instance is running (not paused), NEO4J_URI uses neo4j+s://, \
+         and outbound HTTPS is allowed.",
+    );
+    msg
+}
+
 fn bolt_uri_to_https(uri: &str) -> String {
     let trimmed = uri.trim();
     if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
@@ -191,6 +235,44 @@ fn bolt_uri_to_https(uri: &str) -> String {
         .to_string()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn neo4j_http_query_from_env_file() {
+        load_dotenv();
+        if !neo4j_env_ready() {
+            eprintln!("Skipping Neo4j test: NEO4J_URI / NEO4J_PASSWORD not set");
+            return;
+        }
+
+        let client = Neo4jClient::from_env().expect("Neo4jClient::from_env");
+        let result = client.run("RETURN 1 AS n", json!({})).await;
+        assert!(result.is_ok(), "Neo4j query failed: {:?}", result.err());
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UtteranceSnippet {
+    pub meeting_id: Option<String>,
+    pub speaker: Option<String>,
+    pub text: String,
+    pub sequence_num: Option<i64>,
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingSummarySnippet {
+    pub meeting_id: Option<String>,
+    pub number: Option<i64>,
+    pub title: Option<String>,
+    pub date: Option<String>,
+    pub summary: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientContext {
@@ -201,4 +283,7 @@ pub struct ClientContext {
     pub open_questions: Vec<String>,
     pub open_actions: Vec<String>,
     pub meeting_count: i64,
+    pub meeting_summaries: Vec<MeetingSummarySnippet>,
+    #[serde(default)]
+    pub recent_utterances: Vec<UtteranceSnippet>,
 }

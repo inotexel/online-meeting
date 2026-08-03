@@ -1,10 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
-import {
-  Button,
-  Popover,
-  PopoverTrigger,
-  PopoverContent,
-} from "@/components";
+import { createPortal } from "react-dom";
+import { Button } from "@/components";
 import {
   HeadphonesIcon,
   AlertCircleIcon,
@@ -25,6 +21,8 @@ import { Warning } from "./Warning";
 import { MeetingCoachLayout } from "./MeetingCoachLayout";
 import { OverlaySizeToggle } from "./OverlaySizeToggle";
 import { OverlayAskSection } from "./OverlayAskSection";
+import { AudioVisualizer } from "./audio-visualizer";
+import { StatusIndicator } from "./StatusIndicator";
 import { useSystemAudioType, getCaptureMode, useGoogleCalendar } from "@/hooks";
 import { useApp } from "@/contexts";
 import { cn } from "@/lib/utils";
@@ -72,7 +70,9 @@ export const SystemAudio = (props: useSystemAudioType) => {
     realtimeSegments,
     realtimePendingDelta,
     realtimePendingSpeakerLabel,
+    vadSegments,
     meetingClientName,
+    meetingClientId,
     setMeetingClientName,
     openaiApiKey,
     knowledgeConfigured,
@@ -89,10 +89,10 @@ export const SystemAudio = (props: useSystemAudioType) => {
     sybillResult,
     sybillCard,
     knownClients,
+    refreshKnownClients,
     runSybillSync,
     cancelSybillSync,
     vadWhisper,
-    vadWhisperLastProspectLine,
     vadWhisperCoachStatus,
     vadWhisperCoachLastError,
     vadWhisperCoachBlockedReason,
@@ -155,10 +155,12 @@ export const SystemAudio = (props: useSystemAudioType) => {
     }
   };
 
-  const handleHeadphonesClick = async () => {
+  const handleHeadphonesButtonClick = () => {
     if (capturing) {
-      await stopCapture();
+      void stopCapture();
+      return;
     }
+    setSpeechPanelOpen(!isPopoverOpen);
   };
 
   const handleModeChange = (mode: typeof captureMode) => {
@@ -236,54 +238,37 @@ export const SystemAudio = (props: useSystemAudioType) => {
 
   const meetingAsk = {
     active: Boolean(meetingAskActive),
+    capturing,
     streamAsk: streamMeetingAskQuestion,
   };
 
-  useEffect(() => {
-    if (!isPopoverOpen) return;
-    void resizeWindow(true, { originalHeight: expandedOriginalHeight });
-  }, [capturing, expandedOriginalHeight, isPopoverOpen, resizeWindow]);
+  const speechPanelLayout = useCallback(
+    () => ({
+      sizeMode: overlaySizeMode,
+      originalHeight: expandedOriginalHeight,
+    }),
+    [overlaySizeMode, expandedOriginalHeight]
+  );
 
-  return (
-    <Popover
-      open={isPopoverOpen}
-      onOpenChange={(open) => {
-        if (capturing && !open) {
-          return;
-        }
-        setIsPopoverOpen(open);
-        void resizeWindow(open, {
-          originalHeight: expandedOriginalHeight,
-        });
-      }}
-    >
-      <PopoverTrigger asChild>
-        <Button
-          size="icon"
-          title={getButtonTitle()}
-          onClick={handleHeadphonesClick}
-          className={cn(
-            capturing && "bg-green-50 hover:bg-green-100",
-            error && "bg-red-100 hover:bg-red-200"
-          )}
-        >
-          {getButtonIcon()}
-        </Button>
-      </PopoverTrigger>
+  const setSpeechPanelOpen = useCallback(
+    (open: boolean) => {
+      if (capturing && !open) {
+        return;
+      }
+      if (open) {
+        document.body.dataset.pluelySpeechPanelOpen = "true";
+      } else {
+        delete document.body.dataset.pluelySpeechPanelOpen;
+      }
+      setIsPopoverOpen(open);
+      void resizeWindow(open, open ? speechPanelLayout() : undefined);
+    },
+    [capturing, resizeWindow, setIsPopoverOpen, speechPanelLayout]
+  );
 
-      <PopoverContent
-        align="end"
-        side="bottom"
-        className="w-screen overflow-hidden border border-input/50 p-0 shadow-lg"
-        sideOffset={8}
-      >
-          <div
-            className="flex flex-col overflow-hidden"
-            style={{
-              height: expandedOriginalHeight,
-              maxHeight: "calc(100vh - 2.5rem)",
-            }}
-          >
+  const speechPanel = isPopoverOpen ? (
+    <div className="fixed inset-0 z-[100] flex flex-col overflow-hidden bg-background">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             {/* Header - Mode Switcher + Actions */}
             <div className="flex-shrink-0 select-none border-b border-border/50 p-3">
               <div className="flex items-center justify-between gap-2">
@@ -385,8 +370,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
                       className="h-6 w-6"
                       title="Close"
                       onClick={() => {
-                        setIsPopoverOpen(false);
-                        resizeWindow(false);
+                        setSpeechPanelOpen(false);
                       }}
                     >
                       <XIcon className="h-3.5 w-3.5" />
@@ -395,6 +379,22 @@ export const SystemAudio = (props: useSystemAudioType) => {
                 </div>
               </div>
             </div>
+
+            {/* Capture status — visible inside fullscreen panel */}
+            {!setupRequired && capturing && (
+              <div className="flex flex-shrink-0 items-center gap-2 border-b border-border/50 px-3 py-2">
+                <div className="min-w-0 flex-1">
+                  <AudioVisualizer isRecording={capturing} />
+                </div>
+                <StatusIndicator
+                  setupRequired={setupRequired}
+                  error={error}
+                  isProcessing={isProcessing}
+                  isAIProcessing={isAIProcessing}
+                  capturing={capturing}
+                />
+              </div>
+            )}
 
             {/* Ask — pinned below header so it's always visible */}
             {!setupRequired && (
@@ -486,22 +486,25 @@ export const SystemAudio = (props: useSystemAudioType) => {
                         realtimeSegments={realtimeSegments}
                         realtimePendingDelta={realtimePendingDelta}
                         realtimePendingSpeakerLabel={realtimePendingSpeakerLabel}
+                        vadSegments={vadSegments}
                         whisper={vadWhisper}
-                        lastProspectLine={vadWhisperLastProspectLine}
                         meetingStage={vadWhisperMeetingStage}
                         isThinking={vadWhisperIsThinking}
                         isMemorySyncing={isMemorySyncing}
+                        isProcessing={isProcessing}
                         whisperBlockedReason={whisperBlockedReason}
                         whisperStatus={vadWhisperCoachStatus}
                         whisperError={
                           vadWhisperCoachLastError || memorySyncError
                         }
                         meetingClientName={meetingClientName}
+                        meetingClientId={meetingClientId}
                         onClientNameChange={setMeetingClientName}
                         knowledgeConfigured={knowledgeConfigured}
                         knowledgeStatus={knowledgeStatus}
                         clientGraphContext={clientGraphContext}
                         knownClients={knownClients}
+                        onRefreshKnownClients={refreshKnownClients}
                         onTestConnection={testKnowledgeConnection}
                         openaiApiKey={openaiApiKey}
                         sybillApiKey={sybillApiKey}
@@ -577,7 +580,30 @@ export const SystemAudio = (props: useSystemAudioType) => {
             )}
 
           </div>
-        </PopoverContent>
-    </Popover>
+      </div>
+  ) : null;
+
+  useEffect(() => {
+    if (!isPopoverOpen) return;
+    void resizeWindow(true, speechPanelLayout());
+  }, [capturing, isPopoverOpen, resizeWindow, speechPanelLayout]);
+
+  return (
+    <>
+      <Button
+        size="icon"
+        title={getButtonTitle()}
+        onClick={handleHeadphonesButtonClick}
+        className={cn(
+          isPopoverOpen && "bg-primary/10",
+          capturing && "bg-green-50 hover:bg-green-100",
+          error && "bg-red-100 hover:bg-red-200"
+        )}
+      >
+        {getButtonIcon()}
+      </Button>
+
+      {speechPanel ? createPortal(speechPanel, document.body) : null}
+    </>
   );
 };

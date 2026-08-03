@@ -12,6 +12,22 @@ export interface MemoryExtraction {
   updated_objections: MemoryTextItem[];
 }
 
+export interface MeetingSummarySnippet {
+  meetingId?: string | null;
+  meetingNumber?: number | null;
+  title?: string | null;
+  meetingDate?: string | null;
+  summary?: string | null;
+}
+
+export interface UtteranceSnippet {
+  meetingId?: string | null;
+  speaker?: string | null;
+  text: string;
+  sequenceNum?: number | null;
+  createdAt?: string | null;
+}
+
 export interface ClientGraphContext {
   clientId: string;
   clientName: string;
@@ -20,6 +36,8 @@ export interface ClientGraphContext {
   openQuestions: string[];
   openActions: string[];
   meetingCount: number;
+  meetingSummaries: MeetingSummarySnippet[];
+  recentUtterances: UtteranceSnippet[];
 }
 
 export interface CoachSuggestion {

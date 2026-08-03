@@ -17,3 +17,4 @@ export * from "./useApp";
 export * from "./useMenuItems";
 export * from "./useGoogleCalendar";
 export * from "./useVadWhisperCoach";
+export * from "./useCoachAiSettings";

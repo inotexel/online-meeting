@@ -1,66 +1,42 @@
 import { TYPE_PROVIDER } from "@/types";
-import { ClientGraphContext, RetrievedDocChunk } from "./types";
 import { VICTOR_CLOSING_PLAYBOOK } from "./victor-closing-playbook";
-import { WhisperBrainState } from "./whisper-brain";
+import { formatSharedMeetingContext, MeetingAiContext } from "./meeting-context";
 import { collectStructuredAiText } from "./structured-ai";
 import { fetchAIResponse } from "@/lib/functions";
 
-export const MEETING_ASK_SYSTEM_PROMPT = `You are Victor Dwyer's live deal coach. The seller is on a closing call and typed a question in the app.
+export const MEETING_ASK_SYSTEM_PROMPT = `You are Victor Dwyer's live deal coach. The seller typed a question in the app — before, during, or after a closing call.
 
-You have full context:
+You receive the SAME context as the automatic whisper coach:
 - Victor's closing playbook
 - Live meeting state (stage, objections, buying signals, summary)
-- Client memory from past meetings in the graph
-- Relevant cheat-sheet document excerpts
-- Recent prospect transcript from this call
+- Recent labelled dialogue from this call (User and Client) — empty if the call has not started
+- Client memory from past meetings in the graph (summaries, facts, objections, questions, actions, AND prior meeting transcript lines — what the client and seller actually said before)
+- Relevant cheat-sheet document excerpts for this client
+
+Before the call starts: answer from prior meeting transcript + client memory + cheat-sheet docs + playbook.
+During the call: also use live dialogue and meeting state; do not repeat lines already in "Recent dialogue this call".
+
+When the client asked about pricing, objections, or next steps in a prior meeting, reference that history — do not say there was no prior conversation if transcript lines exist.
+
+CRITICAL — read "Prior meetings on record" in Client memory:
+- If it says "Yes — N prior meeting(s)" (N > 0), this is NOT a first call. Never say "no prior meetings", "no prior conversations", "starting fresh", "first encounter", or "never met before".
+- The UI may show the same client with N meetings in Neo4j — trust "Prior meetings on record" over your assumptions.
+- If transcript is "(none)" but meetings exist, read **Prior meeting summaries** — they may contain full call transcripts. Say prior meetings exist but dialogue/summaries were not loaded yet — do NOT claim zero meetings.
+- Only treat as a first call when prior meetings on record says "No prior meetings recorded".
 
 Answer the seller's question directly. Be concise and actionable.
 - If they need a line to say, give verbatim words they can speak.
 - Use numbers and names from memory/docs only — never invent deal facts.
-- If context is missing, say what to set up (client name, docs, etc.).
+- When you use a fact, briefly note if it came from prior meetings, uploaded docs, or this call's dialogue.
+- If context is missing, say what to set up (client name, docs, Neo4j, etc.).
 
 ${VICTOR_CLOSING_PLAYBOOK}`;
 
-function formatClientMemory(context: ClientGraphContext | null | undefined): string {
-  if (!context) return "(no prior client memory)";
-  return `Client: ${context.clientName}
-Prior meetings: ${context.meetingCount}
-Facts: ${context.facts.join("; ") || "(none)"}
-Open objections: ${context.openObjections.join("; ") || "(none)"}
-Open questions: ${context.openQuestions.join("; ") || "(none)"}
-Open actions: ${context.openActions.join("; ") || "(none)"}`;
-}
-
-function formatDocExcerpts(chunks: RetrievedDocChunk[]): string {
-  if (!chunks.length) {
-    return "(no relevant client document excerpts)";
-  }
-  return chunks
-    .map(
-      (chunk, index) =>
-        `[${index + 1}] ${chunk.documentTitle} (relevance ${chunk.score.toFixed(2)})\n${chunk.text}`
-    )
-    .join("\n\n");
-}
-
 export function buildMeetingAskUserMessage(params: {
   question: string;
-  brainState: WhisperBrainState;
-  clientContext?: ClientGraphContext | null;
-  docChunks?: RetrievedDocChunk[];
-  recentTranscript: string;
+  meetingContext: MeetingAiContext;
 }): string {
-  return `Live meeting state:
-${JSON.stringify(params.brainState, null, 2)}
-
-Client memory:
-${formatClientMemory(params.clientContext)}
-
-Client document excerpts:
-${formatDocExcerpts(params.docChunks ?? [])}
-
-Recent prospect transcript (this call):
-${params.recentTranscript.trim() || "(none captured yet)"}
+  return `${formatSharedMeetingContext(params.meetingContext)}
 
 Seller question:
 ${params.question.trim()}`;
@@ -70,13 +46,13 @@ export async function* streamMeetingAsk(params: {
   provider: TYPE_PROVIDER | undefined;
   selectedProvider: { provider: string; variables: Record<string, string> };
   question: string;
-  brainState: WhisperBrainState;
-  clientContext?: ClientGraphContext | null;
-  docChunks?: RetrievedDocChunk[];
-  recentTranscript: string;
+  meetingContext: MeetingAiContext;
   signal?: AbortSignal;
 }): AsyncGenerator<string> {
-  const userMessage = buildMeetingAskUserMessage(params);
+  const userMessage = buildMeetingAskUserMessage({
+    question: params.question,
+    meetingContext: params.meetingContext,
+  });
 
   for await (const chunk of fetchAIResponse({
     provider: params.provider,
@@ -96,13 +72,13 @@ export async function runMeetingAsk(params: {
   provider: TYPE_PROVIDER | undefined;
   selectedProvider: { provider: string; variables: Record<string, string> };
   question: string;
-  brainState: WhisperBrainState;
-  clientContext?: ClientGraphContext | null;
-  docChunks?: RetrievedDocChunk[];
-  recentTranscript: string;
+  meetingContext: MeetingAiContext;
   signal?: AbortSignal;
 }): Promise<{ answer: string; error?: string }> {
-  const userMessage = buildMeetingAskUserMessage(params);
+  const userMessage = buildMeetingAskUserMessage({
+    question: params.question,
+    meetingContext: params.meetingContext,
+  });
   const result = await collectStructuredAiText({
     provider: params.provider,
     selectedProvider: params.selectedProvider,

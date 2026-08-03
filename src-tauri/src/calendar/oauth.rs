@@ -1,6 +1,6 @@
 use super::storage::{save_tokens, GoogleTokens};
 use serde::Deserialize;
-use std::env;
+use crate::knowledge::env::{google_client_id, google_client_secret, load_dotenv};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_opener::OpenerExt;
@@ -19,13 +19,15 @@ pub fn redirect_uri() -> String {
 }
 
 pub fn client_id() -> Result<String, String> {
-    env::var("GOOGLE_CLIENT_ID").map_err(|_| {
-        "GOOGLE_CLIENT_ID is not set. Add it to src-tauri/.env and restart the app.".to_string()
+    load_dotenv();
+    google_client_id().ok_or_else(|| {
+        "Google Calendar is not configured in this build.".to_string()
     })
 }
 
 fn client_secret() -> Option<String> {
-    env::var("GOOGLE_CLIENT_SECRET").ok().filter(|s| !s.trim().is_empty())
+    load_dotenv();
+    google_client_secret()
 }
 
 fn build_auth_url(state: &str) -> Result<String, String> {

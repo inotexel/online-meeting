@@ -1,7 +1,7 @@
 mod commands;
 mod documents;
 mod embeddings;
-mod env;
+pub mod env;
 mod neo4j;
 
 pub use commands::*;

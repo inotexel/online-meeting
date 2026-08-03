@@ -15,6 +15,9 @@ const isAnyPopoverOpen = (): boolean => {
   if (document.body.dataset.pluelyCapturing === "true") {
     return true;
   }
+  if (document.body.dataset.pluelySpeechPanelOpen === "true") {
+    return true;
+  }
   if (
     document.querySelector('[data-slot="popover-content"][data-state="open"]')
   ) {
@@ -29,7 +32,7 @@ const isAnyPopoverOpen = (): boolean => {
 const toLayoutMode = (
   expanded: boolean,
   sizeMode: OverlaySizeMode
-): "compact" | "fit" | "original" | "fullscreen" => {
+): "compact" | "original" | "fullscreen" => {
   if (!expanded) {
     return "compact";
   }
@@ -95,25 +98,11 @@ export const useWindowResize = () => {
 
         setTimeout(() => {
           if (!isAnyPopoverOpen()) {
-            resizeWindow(false);
+            void resizeWindow(false);
           }
         }, 100);
       }
     };
-
-    const observer = new MutationObserver(() => {
-      if (!isAnyPopoverOpen()) {
-        resizeWindow(false);
-      }
-    });
-
-    // Observe the body for changes to detect popover open/close
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ["data-state"],
-    });
 
     document.addEventListener("mousedown", handleMouseDown);
     document.addEventListener("mouseup", handleMouseUp);
@@ -121,7 +110,6 @@ export const useWindowResize = () => {
     return () => {
       document.removeEventListener("mousedown", handleMouseDown);
       document.removeEventListener("mouseup", handleMouseUp);
-      observer.disconnect();
     };
   }, [resizeWindow]);
 

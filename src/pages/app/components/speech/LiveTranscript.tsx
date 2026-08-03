@@ -35,6 +35,8 @@ interface LiveTranscriptProps {
 
   isCapturing?: boolean;
 
+  isProcessing?: boolean;
+
   showSpeakerLabels?: boolean;
 
   speakerLabelsEnabled?: boolean;
@@ -54,6 +56,9 @@ interface LiveTranscriptProps {
   displayMode?: "caption" | "scroll";
 
   maxHeightClass?: string;
+
+  /** Title + caption only — no header bar, radio icon, or "Listening…" */
+  minimal?: boolean;
 
 }
 
@@ -93,6 +98,8 @@ export const LiveTranscript = ({
 
   isCapturing = false,
 
+  isProcessing = false,
+
   showSpeakerLabels = false,
 
   speakerLabelsEnabled = false,
@@ -110,6 +117,8 @@ export const LiveTranscript = ({
   displayMode = "caption",
 
   maxHeightClass = "max-h-64",
+
+  minimal = false,
 
 }: LiveTranscriptProps) => {
 
@@ -189,6 +198,36 @@ export const LiveTranscript = ({
 
 
 
+  if (minimal) {
+
+    return (
+
+      <div className="space-y-1.5">
+
+        <p className="text-sm font-medium text-foreground">{title}</p>
+
+        <div className="min-h-[2.5rem]">
+
+          {hasContent
+
+            ? renderLine(captionText, captionSpeaker, isCaptionPending)
+
+            : emptyMessage ? (
+
+                <p className="text-sm text-muted-foreground">{emptyMessage}</p>
+
+              ) : null}
+
+        </div>
+
+      </div>
+
+    );
+
+  }
+
+
+
   return (
 
     <div className="rounded-lg border border-border/50 bg-muted/30 overflow-hidden">
@@ -241,7 +280,13 @@ export const LiveTranscript = ({
 
           )}
 
-          {!readOnly && isSessionActive && (
+          {!readOnly && isProcessing && (
+            <span className="text-[9px] text-amber-600 font-medium whitespace-nowrap">
+              Transcribing…
+            </span>
+          )}
+
+          {!readOnly && !isProcessing && isSessionActive && (
 
             <span className="text-[9px] text-green-600 font-medium whitespace-nowrap">
 
@@ -267,7 +312,11 @@ export const LiveTranscript = ({
 
               {emptyMessage ??
 
-                (isSessionActive
+                (isProcessing
+
+                  ? "Transcribing speech…"
+
+                  : isSessionActive
 
                   ? "Waiting for speech from system audio…"
 

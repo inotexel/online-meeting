@@ -56,7 +56,6 @@ pub fn run() {
         .manage(shortcuts::MoveWindowState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_keychain::init())
         .plugin(tauri_plugin_shell::init()) // Add shell plugin
@@ -132,6 +131,7 @@ pub fn run() {
             knowledge::knowledge_append_utterance,
             knowledge::knowledge_apply_memory,
             knowledge::knowledge_get_client_context,
+            knowledge::knowledge_fetch_client_utterances,
             knowledge::knowledge_list_clients,
             knowledge::knowledge_sybill_meeting_exists,
             knowledge::knowledge_import_sybill_meeting,

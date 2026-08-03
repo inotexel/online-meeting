@@ -112,3 +112,26 @@ export async function searchClientDocuments(params: {
     score: row.score,
   }));
 }
+
+const DEFAULT_DOC_SEARCH_TIMEOUT_MS = 20_000;
+
+/** Doc search with a client-side cap so live coach is not blocked on slow Aura. */
+export async function searchClientDocumentsWithTimeout(
+  params: Parameters<typeof searchClientDocuments>[0],
+  timeoutMs = DEFAULT_DOC_SEARCH_TIMEOUT_MS
+): Promise<DocChunkHit[]> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      searchClientDocuments(params),
+      new Promise<DocChunkHit[]>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("Doc search timed out")),
+          timeoutMs
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}

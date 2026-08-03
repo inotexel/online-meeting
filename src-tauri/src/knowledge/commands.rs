@@ -1,7 +1,7 @@
 use super::documents::{
     self, ClientDocumentSummary, DocChunkHit, IngestDocumentInput, SearchClientDocsInput,
 };
-use super::neo4j::{ClientContext, Neo4jClient};
+use super::neo4j::{ClientContext, MeetingSummarySnippet, Neo4jClient, UtteranceSnippet};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -17,6 +17,8 @@ pub struct StartMeetingGraphInput {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppendUtteranceInput {
+    pub client_id: String,
+    pub client_name: Option<String>,
     pub meeting_id: String,
     pub utterance_id: String,
     pub text: String,
@@ -80,6 +82,7 @@ pub async fn knowledge_start_meeting_graph(input: StartMeetingGraphInput) -> Res
         SET c.name = $clientName, c.updated_at = datetime()
         MERGE (m:Meeting {id: $meetingId})
         SET m.number = $meetingNumber,
+            m.client_id = $clientId,
             m.started_at = coalesce(m.started_at, datetime()),
             m.status = 'in_progress'
         MERGE (c)-[:HAS_MEETING]->(m)
@@ -102,28 +105,98 @@ pub async fn knowledge_end_meeting_graph(
     summary: Option<String>,
 ) -> Result<(), String> {
     let neo = client()?;
+    let mut final_summary = summary.filter(|s| !s.trim().is_empty());
+    if final_summary.is_none() {
+        final_summary = build_meeting_summary_from_utterances(&neo, &meeting_id).await?;
+    }
     neo.run(
         r#"
         MATCH (m:Meeting {id: $meetingId})
         SET m.ended_at = datetime(),
             m.status = 'completed',
-            m.summary = coalesce($summary, m.summary)
+            m.summary = CASE
+                WHEN $summary IS NOT NULL AND $summary <> '' THEN $summary
+                ELSE m.summary
+            END
         "#,
         json!({
             "meetingId": meeting_id,
-            "summary": summary,
+            "summary": final_summary,
         }),
     )
     .await?;
     Ok(())
 }
 
+async fn build_meeting_summary_from_utterances(
+    neo: &Neo4jClient,
+    meeting_id: &str,
+) -> Result<Option<String>, String> {
+    let data = neo
+        .run(
+            r#"
+            MATCH (m:Meeting {id: $meetingId})-[:HAS_UTTERANCE]->(u:Utterance)
+            RETURN m.id AS meetingId,
+                   u.speaker_label AS speaker,
+                   u.text AS text,
+                   u.sequence_num AS sequenceNum
+            ORDER BY coalesce(u.sequence_num, 0) ASC,
+                     coalesce(u.created_at, datetime({epochMillis:0})) ASC
+            "#,
+            json!({ "meetingId": meeting_id }),
+        )
+        .await?;
+
+    let utterances = utterance_snippets_list(data);
+    let transcript = utterances_to_transcript_refs(utterances.iter());
+    if transcript.trim().is_empty() {
+        return Ok(None);
+    }
+    let clipped = if transcript.len() > 6000 {
+        transcript[transcript.len().saturating_sub(6000)..].to_string()
+    } else {
+        transcript
+    };
+    Ok(Some(clipped))
+}
+
+fn utterances_to_transcript_refs<'a>(
+    utterances: impl IntoIterator<Item = &'a UtteranceSnippet>,
+) -> String {
+    utterances
+        .into_iter()
+        .filter(|u| !u.text.trim().is_empty())
+        .map(|u| {
+            let label = u.speaker.as_deref().unwrap_or("speaker").to_lowercase();
+            let role = if label == "client" {
+                "Client"
+            } else if label == "user" {
+                "User"
+            } else {
+                "Speaker"
+            };
+            format!("{}: {}", role, u.text.trim())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[tauri::command]
 pub async fn knowledge_append_utterance(input: AppendUtteranceInput) -> Result<(), String> {
     let neo = client()?;
+    let client_name = input
+        .client_name
+        .unwrap_or_else(|| input.client_id.clone());
     neo.run(
         r#"
-        MATCH (m:Meeting {id: $meetingId})
+        MERGE (c:Client {id: $clientId})
+        SET c.name = coalesce($clientName, c.name, $clientId),
+            c.updated_at = datetime()
+        MERGE (m:Meeting {id: $meetingId})
+        SET m.client_id = coalesce(m.client_id, $clientId),
+            m.started_at = coalesce(m.started_at, datetime()),
+            m.status = coalesce(m.status, 'in_progress')
+        MERGE (c)-[:HAS_MEETING]->(m)
         MERGE (u:Utterance {id: $utteranceId})
         SET u.text = $text,
             u.speaker_label = $speakerLabel,
@@ -132,6 +205,8 @@ pub async fn knowledge_append_utterance(input: AppendUtteranceInput) -> Result<(
         MERGE (m)-[:HAS_UTTERANCE]->(u)
         "#,
         json!({
+            "clientId": input.client_id,
+            "clientName": client_name,
             "meetingId": input.meeting_id,
             "utteranceId": input.utterance_id,
             "text": input.text,
@@ -242,33 +317,301 @@ pub async fn knowledge_apply_memory(input: MemoryExtractionInput) -> Result<(), 
     Ok(())
 }
 
-#[tauri::command]
-pub async fn knowledge_get_client_context(client_id: String) -> Result<ClientContext, String> {
-    let neo = client()?;
+async fn repair_client_meeting_links(neo: &Neo4jClient, client_id: &str) -> Result<(), String> {
+    neo.run(
+        r#"
+        MATCH (c:Client {id: $clientId})
+        MATCH (m:Meeting)
+        WHERE m.client_id = $clientId
+        MERGE (c)-[:HAS_MEETING]->(m)
+        "#,
+        json!({ "clientId": client_id }),
+    )
+    .await?;
+
+    neo.run(
+        r#"
+        MATCH (c:Client)-[:HAS_MEETING]->(m:Meeting)
+        WHERE m.client_id IS NULL OR m.client_id = ''
+        SET m.client_id = c.id
+        "#,
+        json!({}),
+    )
+    .await?;
+
+    neo.run(
+        r#"
+        MATCH (c:Client)
+        WITH collect(c) AS clients
+        WHERE size(clients) = 1
+        WITH clients[0] AS c
+        MATCH (m:Meeting)-[:HAS_UTTERANCE]->(:Utterance)
+        WHERE NOT (()-[:HAS_MEETING]->(m))
+        MERGE (c)-[:HAS_MEETING]->(m)
+        SET m.client_id = coalesce(m.client_id, c.id)
+        "#,
+        json!({}),
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn link_meetings_for_client(neo: &Neo4jClient, client_id: &str) -> Result<(), String> {
+    neo.run(
+        r#"
+        MATCH (c:Client {id: $clientId})
+        MATCH (m:Meeting)
+        WHERE m.client_id = $clientId
+        MERGE (c)-[:HAS_MEETING]->(m)
+        "#,
+        json!({ "clientId": client_id }),
+    )
+    .await?;
+
+    neo.run(
+        r#"
+        MATCH (c:Client {id: $clientId})
+        MATCH (m:Meeting)-[:HAS_UTTERANCE]->(:Utterance)
+        WHERE coalesce(m.client_id, '') IN ['', $clientId]
+        MERGE (c)-[:HAS_MEETING]->(m)
+        SET m.client_id = $clientId
+        "#,
+        json!({ "clientId": client_id }),
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn fetch_client_utterances(
+    neo: &Neo4jClient,
+    client_id: &str,
+    client_name: Option<&str>,
+) -> Result<Vec<UtteranceSnippet>, String> {
+    let utterance_data = neo
+        .run(
+            r#"
+            OPTIONAL MATCH (byId:Client {id: $clientId})
+            OPTIONAL MATCH (byName:Client)
+            WHERE $clientName IS NOT NULL AND $clientName <> '' AND (
+                toLower(trim(byName.name)) = toLower(trim($clientName))
+                OR toLower(byName.name) CONTAINS toLower(trim($clientName))
+            )
+            WITH coalesce(byId, head(collect(DISTINCT byName))) AS c
+            MATCH (m:Meeting)-[:HAS_UTTERANCE]->(u:Utterance)
+            WHERE m.client_id = $clientId
+               OR (c IS NOT NULL AND (c)-[:HAS_MEETING]->(m))
+               OR EXISTS { MATCH (:Client {id: $clientId})-[:HAS_MEETING]->(m) }
+            RETURN DISTINCT m.id AS meetingId,
+                   coalesce(u.speaker_label, 'client') AS speaker,
+                   u.text AS text,
+                   u.sequence_num AS sequenceNum,
+                   toString(u.created_at) AS createdAt
+            ORDER BY coalesce(u.sequence_num, 0) ASC, coalesce(u.created_at, datetime({epochMillis:0})) ASC
+            LIMIT 200
+            "#,
+            json!({
+                "clientId": client_id,
+                "clientName": client_name.unwrap_or(""),
+            }),
+        )
+        .await?;
+
+    Ok(utterance_snippets_list(utterance_data))
+}
+
+async fn backfill_meeting_summaries_from_utterances(
+    neo: &Neo4jClient,
+    client_id: &str,
+    utterances: &[UtteranceSnippet],
+) -> Result<(), String> {
+    let mut by_meeting: std::collections::HashMap<String, Vec<&UtteranceSnippet>> =
+        std::collections::HashMap::new();
+    for u in utterances {
+        if let Some(mid) = &u.meeting_id {
+            by_meeting.entry(mid.clone()).or_default().push(u);
+        }
+    }
+
+    for (meeting_id, lines) in by_meeting {
+        let mut sorted: Vec<&UtteranceSnippet> = lines;
+        sorted.sort_by(|a, b| {
+            a.sequence_num
+                .unwrap_or(0)
+                .cmp(&b.sequence_num.unwrap_or(0))
+        });
+        let transcript: String = utterances_to_transcript_refs(sorted.iter().map(|u| *u));
+        if transcript.is_empty() {
+            continue;
+        }
+        let clipped = if transcript.len() > 6000 {
+            transcript[transcript.len().saturating_sub(6000)..].to_string()
+        } else {
+            transcript
+        };
+        neo.run(
+            r#"
+            MATCH (m:Meeting {id: $meetingId})
+            WHERE coalesce(m.client_id, '') IN ['', $clientId]
+              AND (m.summary IS NULL OR m.summary = '')
+            SET m.summary = $summary,
+                m.client_id = coalesce(m.client_id, $clientId)
+            "#,
+            json!({
+                "meetingId": meeting_id,
+                "clientId": client_id,
+                "summary": clipped,
+            }),
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+fn json_to_i64(value: Option<&Value>) -> i64 {
+    match value {
+        Some(Value::Number(n)) => n
+            .as_i64()
+            .or_else(|| n.as_f64().map(|f| f as i64))
+            .unwrap_or(0),
+        Some(Value::String(s)) => s.parse().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+async fn count_linked_meetings(neo: &Neo4jClient, client_id: &str) -> Result<i64, String> {
     let data = neo
         .run(
             r#"
-            OPTIONAL MATCH (c:Client {id: $clientId})
-            OPTIONAL MATCH (c)-[:HAS_FACT]->(f:Fact)
-            OPTIONAL MATCH (c)-[:HAS_MEETING]->(m:Meeting)
-            OPTIONAL MATCH (m)-[:RAISED]->(o:Objection {status: 'open'})
-            OPTIONAL MATCH (m)-[:MENTIONED]->(q:Question {status: 'open'})
-            OPTIONAL MATCH (m)-[:CREATED]->(a:ActionItem {status: 'open'})
-            RETURN coalesce(c.name, $clientId) AS clientName,
-                   count(DISTINCT m) AS meetingCount,
-                   [x IN collect(DISTINCT f.text) WHERE x IS NOT NULL] AS facts,
-                   [x IN collect(DISTINCT o.text) WHERE x IS NOT NULL] AS openObjections,
-                   [x IN collect(DISTINCT q.text) WHERE x IS NOT NULL] AS openQuestions,
-                   [x IN collect(DISTINCT a.text) WHERE x IS NOT NULL] AS openActions
+            MATCH (c:Client {id: $clientId})
+            OPTIONAL MATCH (c)-[:HAS_MEETING]->(mRel:Meeting)
+            WITH c, collect(DISTINCT mRel) AS relMeetings
+            OPTIONAL MATCH (mProp:Meeting)
+            WHERE mProp.client_id = c.id
+            WITH c, relMeetings, collect(DISTINCT mProp) AS propMeetings
+            WITH [m IN (relMeetings + propMeetings) WHERE m IS NOT NULL] AS rawMeetings
+            UNWIND CASE WHEN size(rawMeetings) > 0 THEN rawMeetings ELSE [null] END AS m
+            WITH [x IN collect(DISTINCT m) WHERE x IS NOT NULL] AS meetings
+            RETURN size(meetings) AS meetingCount
             "#,
             json!({ "clientId": client_id }),
         )
         .await?;
 
-    parse_client_context(&client_id, data)
+    let count = data
+        .get("values")
+        .and_then(|v| v.as_array())
+        .and_then(|rows| rows.first())
+        .and_then(|row| row.as_array())
+        .and_then(|row| row.first());
+
+    Ok(json_to_i64(count))
 }
 
-fn parse_client_context(client_id: &str, data: Value) -> Result<ClientContext, String> {
+#[tauri::command]
+pub async fn knowledge_get_client_context(
+    client_id: String,
+    client_name: Option<String>,
+) -> Result<ClientContext, String> {
+    let neo = client()?;
+    repair_client_meeting_links(&neo, &client_id).await?;
+    link_meetings_for_client(&neo, &client_id).await?;
+
+    let resolved_id = client_id.clone();
+    let utterances =
+        fetch_client_utterances(&neo, &resolved_id, client_name.as_deref()).await?;
+    if !utterances.is_empty() {
+        let _ = backfill_meeting_summaries_from_utterances(&neo, &resolved_id, &utterances).await;
+    }
+
+    let data = neo
+        .run(
+            r#"
+            OPTIONAL MATCH (byId:Client {id: $clientId})
+            OPTIONAL MATCH (byName:Client)
+            WHERE $clientName IS NOT NULL AND $clientName <> '' AND (
+                toLower(trim(byName.name)) = toLower(trim($clientName))
+                OR toLower(byName.name) CONTAINS toLower(trim($clientName))
+                OR toLower(trim($clientName)) CONTAINS toLower(byName.name)
+            )
+            WITH coalesce(byId, head(collect(DISTINCT byName))) AS c
+            OPTIONAL MATCH (c)-[:HAS_MEETING]->(mRel:Meeting)
+            WITH c, collect(DISTINCT mRel) AS relMeetings
+            OPTIONAL MATCH (mProp:Meeting)
+            WHERE c IS NOT NULL AND mProp.client_id = c.id
+            WITH c, relMeetings, collect(DISTINCT mProp) AS propMeetings
+            WITH c,
+                 [m IN (relMeetings + propMeetings) WHERE m IS NOT NULL] AS rawMeetings
+            UNWIND CASE WHEN size(rawMeetings) > 0 THEN rawMeetings ELSE [null] END AS mx
+            WITH c, [x IN collect(DISTINCT mx) WHERE x IS NOT NULL] AS meetings
+            OPTIONAL MATCH (c)-[:HAS_FACT]->(f:Fact)
+            WITH c, meetings, collect(DISTINCT f.text) AS facts
+            UNWIND CASE WHEN size(meetings) > 0 THEN meetings ELSE [null] END AS m
+            OPTIONAL MATCH (m)-[:RAISED]->(o:Objection {status: 'open'})
+            OPTIONAL MATCH (m)-[:MENTIONED]->(q:Question {status: 'open'})
+            OPTIONAL MATCH (m)-[:CREATED]->(a:ActionItem {status: 'open'})
+            WITH c,
+                 facts,
+                 meetings,
+                 collect(DISTINCT o.text) AS openObjections,
+                 collect(DISTINCT q.text) AS openQuestions,
+                 collect(DISTINCT a.text) AS openActions
+            RETURN coalesce(c.id, $clientId) AS clientId,
+                   coalesce(c.name, $clientName, $clientId) AS clientName,
+                   size(meetings) AS meetingCount,
+                   [x IN facts WHERE x IS NOT NULL AND x <> ''] AS facts,
+                   [x IN openObjections WHERE x IS NOT NULL AND x <> ''] AS openObjections,
+                   [x IN openQuestions WHERE x IS NOT NULL AND x <> ''] AS openQuestions,
+                   [x IN openActions WHERE x IS NOT NULL AND x <> ''] AS openActions,
+                   [m IN meetings | {
+                       id: m.id,
+                       number: m.number,
+                       title: m.title,
+                       date: coalesce(m.meeting_date, toString(m.started_at)),
+                       summary: m.summary
+                   }] AS meetingSummaries
+            "#,
+            json!({
+                "clientId": client_id,
+                "clientName": client_name.clone().unwrap_or_default(),
+            }),
+        )
+        .await?;
+
+    let mut ctx = parse_client_context(data)?;
+
+    let resolved_id = if ctx.client_id.is_empty() {
+        client_id.clone()
+    } else {
+        ctx.client_id.clone()
+    };
+
+    if ctx.meeting_count == 0 {
+        ctx.meeting_count = count_linked_meetings(&neo, &resolved_id).await?;
+    }
+
+    ctx.recent_utterances = utterances;
+    if ctx.meeting_count == 0 && !ctx.recent_utterances.is_empty() {
+        ctx.meeting_count = count_linked_meetings(&neo, &resolved_id).await?;
+    }
+
+    Ok(ctx)
+}
+
+#[tauri::command]
+pub async fn knowledge_fetch_client_utterances(
+    client_id: String,
+    client_name: Option<String>,
+) -> Result<Vec<UtteranceSnippet>, String> {
+    let neo = client()?;
+    repair_client_meeting_links(&neo, &client_id).await?;
+    link_meetings_for_client(&neo, &client_id).await?;
+    fetch_client_utterances(&neo, &client_id, client_name.as_deref()).await
+}
+
+fn parse_client_context(data: Value) -> Result<ClientContext, String> {
     let values = data
         .get("values")
         .and_then(|v| v.as_array())
@@ -276,22 +619,137 @@ fn parse_client_context(client_id: &str, data: Value) -> Result<ClientContext, S
         .and_then(|row| row.as_array())
         .ok_or_else(|| "No context returned from Neo4j".to_string())?;
 
-    let client_name = values
+    let client_id = values
         .first()
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let client_name = values
+        .get(1)
         .and_then(|v| v.as_str())
         .unwrap_or("Client")
         .to_string();
-    let meeting_count = values.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
+    let meeting_count = json_to_i64(values.get(2));
 
     Ok(ClientContext {
-        client_id: client_id.to_string(),
+        client_id,
         client_name,
         meeting_count,
-        facts: string_list(values.get(2)),
-        open_objections: string_list(values.get(3)),
-        open_questions: string_list(values.get(4)),
-        open_actions: string_list(values.get(5)),
+        facts: string_list(values.get(3)),
+        open_objections: string_list(values.get(4)),
+        open_questions: string_list(values.get(5)),
+        open_actions: string_list(values.get(6)),
+        meeting_summaries: meeting_summaries_list(values.get(7)),
+        recent_utterances: vec![],
     })
+}
+
+fn json_value_to_string(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+fn utterance_from_row(row: &Value) -> Option<UtteranceSnippet> {
+    if let Some(obj) = row.as_object() {
+        let text = obj
+            .get("text")
+            .map(json_value_to_string)
+            .unwrap_or_default();
+        if text.trim().is_empty() {
+            return None;
+        }
+        return Some(UtteranceSnippet {
+            meeting_id: obj
+                .get("meetingId")
+                .or_else(|| obj.get("meeting_id"))
+                .map(json_value_to_string)
+                .filter(|s| !s.is_empty()),
+            speaker: obj
+                .get("speaker")
+                .or_else(|| obj.get("speaker_label"))
+                .map(json_value_to_string)
+                .filter(|s| !s.is_empty()),
+            text,
+            sequence_num: obj
+                .get("sequenceNum")
+                .or_else(|| obj.get("sequence_num"))
+                .map(|v| json_to_i64(Some(v))),
+            created_at: obj
+                .get("createdAt")
+                .or_else(|| obj.get("created_at"))
+                .map(json_value_to_string)
+                .filter(|s| !s.is_empty()),
+        });
+    }
+
+    let row = row.as_array()?;
+    let text = row.get(2).map(json_value_to_string).unwrap_or_default();
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(UtteranceSnippet {
+        meeting_id: row
+            .first()
+            .map(json_value_to_string)
+            .filter(|s| !s.is_empty()),
+        speaker: row
+            .get(1)
+            .map(json_value_to_string)
+            .filter(|s| !s.is_empty()),
+        text,
+        sequence_num: row.get(3).map(|v| json_to_i64(Some(v))),
+        created_at: row
+            .get(4)
+            .map(json_value_to_string)
+            .filter(|s| !s.is_empty()),
+    })
+}
+
+fn utterance_snippets_list(data: Value) -> Vec<UtteranceSnippet> {
+    data.get("values")
+        .and_then(|v| v.as_array())
+        .map(|rows| {
+            rows.iter()
+                .filter_map(utterance_from_row)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn meeting_summaries_list(value: Option<&Value>) -> Vec<MeetingSummarySnippet> {
+    value
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let obj = item.as_object()?;
+                    Some(MeetingSummarySnippet {
+                        meeting_id: obj
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        number: obj.get("number").and_then(|v| v.as_i64()),
+                        title: obj
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        date: obj
+                            .get("date")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                        summary: obj
+                            .get("summary")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string()),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn string_list(value: Option<&Value>) -> Vec<String> {
@@ -318,14 +776,23 @@ pub struct ClientSummary {
 #[tauri::command]
 pub async fn knowledge_list_clients() -> Result<Vec<ClientSummary>, String> {
     let neo = client()?;
+    let _ = repair_client_meeting_links(&neo, "").await;
     let data = neo
         .run(
             r#"
             MATCH (c:Client)
-            OPTIONAL MATCH (c)-[:HAS_MEETING]->(m:Meeting)
+            OPTIONAL MATCH (c)-[:HAS_MEETING]->(mRel:Meeting)
+            WITH c, collect(DISTINCT mRel) AS relMeetings
+            OPTIONAL MATCH (mProp:Meeting)
+            WHERE mProp.client_id = c.id
+            WITH c, relMeetings, collect(DISTINCT mProp) AS propMeetings
+            WITH c,
+                 [m IN (relMeetings + propMeetings) WHERE m IS NOT NULL] AS rawMeetings
+            UNWIND CASE WHEN size(rawMeetings) > 0 THEN rawMeetings ELSE [null] END AS m
+            WITH c, [x IN collect(DISTINCT m) WHERE x IS NOT NULL] AS meetings
             RETURN c.id AS clientId,
                    coalesce(c.name, c.id) AS clientName,
-                   count(m) AS meetingCount
+                   size(meetings) AS meetingCount
             ORDER BY clientName
             "#,
             json!({}),
@@ -344,7 +811,7 @@ pub async fn knowledge_list_clients() -> Result<Vec<ClientSummary>, String> {
         .map(|row| ClientSummary {
             client_id: row.first().and_then(|v| v.as_str()).unwrap_or("").to_string(),
             client_name: row.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            meeting_count: row.get(2).and_then(|v| v.as_i64()).unwrap_or(0),
+            meeting_count: json_to_i64(row.get(2)),
         })
         .filter(|c| !c.client_id.is_empty())
         .collect())
@@ -408,6 +875,7 @@ pub async fn knowledge_import_sybill_meeting(
         MERGE (m:Meeting {id: $meetingId})
         SET m.source = 'sybill',
             m.sybill_id = $sybillId,
+            m.client_id = $clientId,
             m.title = $title,
             m.call_type = $callType,
             m.meeting_date = $meetingDate,

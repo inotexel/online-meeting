@@ -1,5 +1,6 @@
 import { Button, Card, DragButton } from "@/components";
 import { RefreshCcwIcon, SparklesIcon } from "lucide-react";
+import { APP_DISPLAY_NAME } from "@/config";
 
 export const ErrorLayout = ({ isCompact }: { isCompact?: boolean }) => {
   return isCompact ? (
@@ -26,7 +27,7 @@ export const ErrorLayout = ({ isCompact }: { isCompact?: boolean }) => {
             <div className="flex size-6 items-center justify-center rounded-lg bg-foreground">
               <SparklesIcon className="size-4 text-background" />
             </div>
-            <h1 className="text-md font-semibold text-foreground">Pluely</h1>
+            <h1 className="text-md font-semibold text-foreground">{APP_DISPLAY_NAME}</h1>
           </div>
         </div>
 

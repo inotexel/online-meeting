@@ -96,35 +96,20 @@ fn active_monitor(window: &WebviewWindow) -> Result<tauri::Monitor, String> {
         .ok_or_else(|| "No monitor found".to_string())
 }
 
-fn monitor_logical_size(monitor: &tauri::Monitor) -> (f64, f64) {
-    let size = monitor.size();
-    let scale = monitor.scale_factor();
-    (
-        size.width as f64 / scale,
-        size.height as f64 / scale,
-    )
-}
-
-fn monitor_logical_origin(monitor: &tauri::Monitor) -> (f64, f64) {
-    let position = monitor.position();
-    let scale = monitor.scale_factor();
-    (
-        position.x as f64 / scale,
-        position.y as f64 / scale,
-    )
-}
-
-/// `mode`: `compact` | `fit` | `original` | `fullscreen`
+/// `mode`: `compact` | `original` | `fullscreen`
 #[tauri::command]
 pub fn set_overlay_layout(
     window: tauri::WebviewWindow,
     mode: String,
     height: Option<u32>,
 ) -> Result<(), String> {
-    use tauri::{LogicalPosition, LogicalSize, Position, Size};
+    use tauri::{LogicalSize, PhysicalPosition, PhysicalSize, Position, Size};
 
     match mode.as_str() {
         "compact" => {
+            window
+                .set_resizable(false)
+                .map_err(|e| format!("Failed to lock window resize: {}", e))?;
             window
                 .set_size(Size::Logical(LogicalSize::new(
                     ORIGINAL_OVERLAY_WIDTH,
@@ -139,6 +124,9 @@ pub fn set_overlay_layout(
                 .map(|h| h as f64)
                 .unwrap_or(DEFAULT_EXPANDED_HEIGHT);
             window
+                .set_resizable(true)
+                .map_err(|e| format!("Failed to enable window resize: {}", e))?;
+            window
                 .set_size(Size::Logical(LogicalSize::new(
                     ORIGINAL_OVERLAY_WIDTH,
                     expanded_height,
@@ -147,27 +135,23 @@ pub fn set_overlay_layout(
             position_window_top_center(&window, TOP_OFFSET)
                 .map_err(|e| e.to_string())?;
         }
-        "fit" => {
-            let monitor = active_monitor(&window)?;
-            let (logical_w, logical_h) = monitor_logical_size(&monitor);
-            let fit_w = logical_w * 0.96;
-            let fit_h = logical_h * 0.92;
-            window
-                .set_size(Size::Logical(LogicalSize::new(fit_w, fit_h)))
-                .map_err(|e| format!("Failed to resize window: {}", e))?;
-            position_window_top_center(&window, TOP_OFFSET)
-                .map_err(|e| e.to_string())?;
-        }
         "fullscreen" => {
             let monitor = active_monitor(&window)?;
-            let (logical_w, logical_h) = monitor_logical_size(&monitor);
-            let (origin_x, origin_y) = monitor_logical_origin(&monitor);
+            let monitor_size = monitor.size();
+            let monitor_position = monitor.position();
             window
-                .set_size(Size::Logical(LogicalSize::new(logical_w, logical_h)))
+                .set_resizable(true)
+                .map_err(|e| format!("Failed to enable window resize: {}", e))?;
+            window
+                .set_size(Size::Physical(PhysicalSize::new(
+                    monitor_size.width,
+                    monitor_size.height,
+                )))
                 .map_err(|e| format!("Failed to resize window: {}", e))?;
             window
-                .set_position(Position::Logical(LogicalPosition::new(
-                    origin_x, origin_y,
+                .set_position(Position::Physical(PhysicalPosition::new(
+                    monitor_position.x,
+                    monitor_position.y,
                 )))
                 .map_err(|e| format!("Failed to set window position: {}", e))?;
         }
@@ -193,31 +177,41 @@ pub fn open_dashboard(app: tauri::AppHandle) -> Result<(), String> {
     show_dashboard_window(&app)
 }
 
+/// Brings the dashboard to the foreground (handles minimized + hidden states).
+fn focus_dashboard_window<R: Runtime>(dashboard_window: &WebviewWindow<R>) -> Result<(), String> {
+    if dashboard_window.is_minimized().unwrap_or(false) {
+        dashboard_window
+            .unminimize()
+            .map_err(|e| format!("Failed to unminimize dashboard window: {}", e))?;
+    }
+
+    if !dashboard_window.is_visible().unwrap_or(false) {
+        dashboard_window
+            .show()
+            .map_err(|e| format!("Failed to show dashboard window: {}", e))?;
+    }
+
+    dashboard_window
+        .set_focus()
+        .map_err(|e| format!("Failed to focus dashboard window: {}", e))?;
+
+    Ok(())
+}
+
 #[tauri::command]
 pub fn toggle_dashboard(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(dashboard_window) = app.get_webview_window("dashboard") {
-        match dashboard_window.is_visible() {
-            Ok(true) => {
-                // Window is visible, hide it
-                dashboard_window
-                    .hide()
-                    .map_err(|e| format!("Failed to hide dashboard window: {}", e))?;
-            }
-            Ok(false) => {
-                // Window is hidden, show and focus it
-                dashboard_window
-                    .show()
-                    .map_err(|e| format!("Failed to show dashboard window: {}", e))?;
-                dashboard_window
-                    .set_focus()
-                    .map_err(|e| format!("Failed to focus dashboard window: {}", e))?;
-            }
-            Err(e) => {
-                return Err(format!("Failed to check dashboard visibility: {}", e));
-            }
+        let visible = dashboard_window.is_visible().unwrap_or(false);
+        let minimized = dashboard_window.is_minimized().unwrap_or(false);
+
+        if visible && !minimized {
+            dashboard_window
+                .hide()
+                .map_err(|e| format!("Failed to hide dashboard window: {}", e))?;
+        } else {
+            focus_dashboard_window(&dashboard_window)?;
         }
     } else {
-        // Window doesn't exist, create and show it
         show_dashboard_window(&app)?;
     }
 
@@ -260,7 +254,7 @@ pub fn create_dashboard_window<R: Runtime>(
 
     #[cfg(target_os = "macos")]
     let base_builder = base_builder
-        .title("Pluely - Dashboard")
+        .title("Closing Coach - Dashboard")
         .center()
         .decorations(true)
         .inner_size(1200.0, 800.0)
@@ -273,7 +267,7 @@ pub fn create_dashboard_window<R: Runtime>(
 
     #[cfg(not(target_os = "macos"))]
     let base_builder = base_builder
-        .title("Pluely - Dashboard")
+        .title("Closing Coach - Dashboard")
         .center()
         .decorations(true)
         .inner_size(800.0, 600.0)
@@ -307,23 +301,11 @@ fn setup_dashboard_close_handler<R: Runtime>(window: &WebviewWindow<R>) {
 /// Shows the dashboard window and brings it to focus
 pub fn show_dashboard_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     if let Some(dashboard_window) = app.get_webview_window("dashboard") {
-        // Window exists, show and focus it
-        dashboard_window
-            .show()
-            .map_err(|e| format!("Failed to show dashboard window: {}", e))?;
-        dashboard_window
-            .set_focus()
-            .map_err(|e| format!("Failed to focus dashboard window: {}", e))?;
+        focus_dashboard_window(&dashboard_window)?;
     } else {
-        // Window doesn't exist, create it and then show it
         let window = create_dashboard_window(app)
             .map_err(|e| format!("Failed to create dashboard window: {}", e))?;
-        window
-            .show()
-            .map_err(|e| format!("Failed to show new dashboard window: {}", e))?;
-        window
-            .set_focus()
-            .map_err(|e| format!("Failed to focus new dashboard window: {}", e))?;
+        focus_dashboard_window(&window)?;
     }
     Ok(())
 }
