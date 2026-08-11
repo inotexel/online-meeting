@@ -22,3 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# web workspace
+web/node_modules
+web/.next
+web/.env.local

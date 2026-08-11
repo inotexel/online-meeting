@@ -1,6 +1,6 @@
-# Store Rust build artifacts on D: to avoid filling C:
-[build]
-target-dir = "D:/cargo-target/pluely"
+# NOTE: no [build] target-dir here — it is not platform-conditional and would
+# resolve to a junk "D:" directory on Linux/macOS. Windows devs who want
+# artifacts off C: set CARGO_TARGET_DIR in dev.cmd instead.
 
 # Large Tauri apps can exceed MSVC's PDB limit during debug links (LNK1140).
 # /PDB:NONE disables PDB output; MSVC may create a file literally named "NONE"

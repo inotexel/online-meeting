@@ -1,0 +1,118 @@
+@import "tailwindcss";
+
+/* Light-first palette. Token names are semantic (`ink` = page ground, `panel` =
+   raised surface) so every page — marketing and auth alike — restyles from here
+   without touching markup. */
+@theme {
+  --color-ink: #fafafa; /* page background */
+  --color-panel: #ffffff; /* cards, inputs */
+  --color-line: #e7e5e4; /* hairline borders */
+  --color-mute: #6b7280; /* secondary text — 4.8:1 on white */
+  --color-fg: #171717; /* primary text */
+  --color-accent: #4f46e5; /* indigo CTA / highlights — 6.3:1 on white */
+  --color-accent-soft: #eef2ff; /* tinted chip / icon backgrounds */
+
+  --font-sans: var(--font-jakarta), ui-sans-serif, system-ui, sans-serif;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--color-ink);
+  color: var(--color-fg);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ------------------------------------------------------------------ hero */
+
+/* Soft radial washes behind the hero — depth without shipping an image. */
+.hero-glow {
+  background:
+    radial-gradient(50rem 26rem at 18% -6rem, rgba(79, 70, 229, 0.1), transparent 65%),
+    radial-gradient(44rem 24rem at 85% -4rem, rgba(14, 165, 233, 0.08), transparent 65%),
+    var(--color-ink);
+}
+
+/* Slow drift for the hero's decorative blobs. transform/opacity only. */
+@keyframes float-slow {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-14px) scale(1.03);
+  }
+}
+.animate-float-slow {
+  animation: float-slow 9s ease-in-out infinite;
+}
+.animate-float-slower {
+  animation: float-slow 13s ease-in-out infinite reverse;
+}
+
+/* Live-listening pulse on the overlay mock's record dot. */
+@keyframes pulse-dot {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.45);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgba(239, 68, 68, 0);
+  }
+}
+.animate-pulse-dot {
+  animation: pulse-dot 1.8s ease-out infinite;
+}
+
+/* ------------------------------------------------------- scroll reveals */
+
+/* Elements start shifted + transparent; the Reveal component adds .is-visible
+   when they enter the viewport. Pure transform/opacity, GPU-cheap. */
+.reveal {
+  opacity: 0;
+  transform: translateY(24px);
+  transition:
+    opacity 0.6s cubic-bezier(0.16, 1, 0.3, 1),
+    transform 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+  transition-delay: var(--reveal-delay, 0ms);
+}
+.reveal.is-visible {
+  opacity: 1;
+  transform: none;
+}
+
+/* --------------------------------------------------------------- marquee */
+
+@keyframes marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    /* Content is duplicated once, so -50% loops seamlessly. */
+    transform: translateX(-50%);
+  }
+}
+.animate-marquee {
+  animation: marquee 28s linear infinite;
+}
+
+/* ------------------------------------------------------- reduced motion */
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+  .animate-float-slow,
+  .animate-float-slower,
+  .animate-marquee,
+  .animate-pulse-dot {
+    animation: none;
+  }
+}

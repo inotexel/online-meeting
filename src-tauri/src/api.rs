@@ -51,33 +51,32 @@ struct SecureStorage {
     selected_pluely_model: Option<String>,
 }
 
+// Credentials attached to Pluely-hosted API calls. Since the account-auth
+// migration these are the session's access token (as the bearer credential)
+// and the machine id (as the instance identifier); the legacy license-key
+// storage only still supplies the selected model.
 pub async fn get_stored_credentials(
     app: &AppHandle,
 ) -> Result<(String, String, Option<Model>), String> {
-    let storage_path = get_secure_storage_path(app)?;
+    let access_token = crate::auth::current_access_token(app)?;
 
-    if !storage_path.exists() {
-        return Err("No license found. Please activate your license first.".to_string());
-    }
+    let machine_id = {
+        use tauri_plugin_machine_uid::MachineUidExt;
+        app.machine_uid()
+            .get_machine_uid()
+            .ok()
+            .and_then(|uid| uid.id)
+            .unwrap_or_default()
+    };
 
-    let content = fs::read_to_string(&storage_path)
-        .map_err(|e| format!("Failed to read storage file: {}", e))?;
+    // Model selection still lives in the old secure-storage file.
+    let selected_model: Option<Model> = (|| {
+        let content = fs::read_to_string(get_secure_storage_path(app).ok()?).ok()?;
+        let storage: SecureStorage = serde_json::from_str(&content).ok()?;
+        serde_json::from_str(&storage.selected_pluely_model?).ok()
+    })();
 
-    let storage: SecureStorage = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse storage file: {}", e))?;
-
-    let license_key = storage
-        .license_key
-        .ok_or("License key not found".to_string())?;
-    let instance_id = storage
-        .instance_id
-        .ok_or("Instance ID not found".to_string())?;
-
-    let selected_model: Option<Model> = storage
-        .selected_pluely_model
-        .and_then(|json_str| serde_json::from_str(&json_str).ok());
-
-    Ok((license_key, instance_id, selected_model))
+    Ok((access_token, machine_id, selected_model))
 }
 
 // Audio API Structs
@@ -1070,11 +1069,11 @@ pub async fn create_system_prompt(
     Ok(system_prompt_response)
 }
 
-// Helper command to check if license is available
+// Whether the Pluely-hosted API may be used: signed in + entitled, per the
+// cached account session (grace-window aware, no network).
 #[tauri::command]
 pub async fn check_license_status(app: AppHandle) -> Result<bool, String> {
-    let _ = app;
-    Ok(true)
+    Ok(crate::auth::is_entitled_cached(&app))
 }
 
 #[allow(dead_code)]

@@ -1,5 +1,6 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 mod activate;
+mod auth;
 mod api;
 mod capture;
 mod db;
@@ -53,6 +54,7 @@ pub fn run() {
         })
         .manage(shortcuts::RegisteredShortcuts::default())
         .manage(shortcuts::LicenseState::default())
+        .manage(auth::AuthFlowState::default())
         .manage(shortcuts::MoveWindowState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -73,7 +75,8 @@ pub fn run() {
             }),
             ..Default::default()
         }))
-        .plugin(tauri_plugin_machine_uid::init());
+        .plugin(tauri_plugin_machine_uid::init())
+        .plugin(tauri_plugin_deep_link::init());
     #[cfg(target_os = "macos")]
     {
         builder = builder.plugin(tauri_nspanel::init());
@@ -99,11 +102,9 @@ pub fn run() {
             shortcuts::set_app_icon_visibility,
             shortcuts::set_always_on_top,
             shortcuts::exit_app,
-            activate::activate_license_api,
-            activate::deactivate_license_api,
-            activate::validate_license_api,
-            activate::mask_license_key_cmd,
-            activate::get_checkout_url,
+            auth::auth_start_sign_in,
+            auth::auth_get_status,
+            auth::auth_sign_out,
             activate::secure_storage_save,
             activate::secure_storage_get,
             activate::secure_storage_remove,
@@ -150,6 +151,21 @@ pub fn run() {
             calendar::calendar_redirect_uri,
         ])
         .setup(|app| {
+            // Route pluely://auth deep links (desktop sign-in hand-off).
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                // Dev builds aren't installed, so the scheme isn't registered by
+                // the installer; register at runtime where supported.
+                #[cfg(any(target_os = "linux", windows))]
+                if let Err(e) = app.deep_link().register("pluely") {
+                    eprintln!("Could not register pluely:// scheme: {}", e);
+                }
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    auth::handle_deep_link(&handle, event.urls());
+                });
+            }
+
             // Setup main window positioning
             window::setup_main_window(app).expect("Failed to setup main window");
             #[cfg(target_os = "macos")]

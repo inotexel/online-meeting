@@ -1,14 +1,13 @@
-import { useState } from "react";
 import { Button } from "@/components";
-import { invoke } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { useAuth } from "@/hooks";
 import { ANALYTICS_EVENTS, captureEvent } from "@/lib";
 
-interface CheckoutResponse {
-  success?: boolean;
-  checkout_url?: string;
-  error?: string;
-}
+/**
+ * "Unlock Pro" button. Signed out → opens the browser sign-in flow (the
+ * pluely:// deep link completes it); signed in but free → opens the pricing
+ * page to subscribe. Keeps the old GetLicense name/props so existing call
+ * sites don't change.
+ */
 export const GetLicense = ({
   setState,
   buttonText,
@@ -18,36 +17,33 @@ export const GetLicense = ({
   buttonText?: string;
   buttonClassName?: string;
 }) => {
-  const [isCheckoutLoading, setIsCheckoutLoading] = useState(false);
+  const { signed_in, loading, signIn } = useAuth();
 
-  const handleGetLicenseKey = async () => {
-    setIsCheckoutLoading(true);
-
+  const handleClick = async () => {
     try {
-      const response: CheckoutResponse = await invoke("get_checkout_url");
-
-      if (response.success && response.checkout_url) {
-        // Open checkout URL in default browser
-        await openUrl(response.checkout_url);
-        setState?.(false);
+      if (!signed_in) {
+        await signIn(); // browser opens; deep link finishes the job
+      } else {
+        // Signed in but not entitled: subscribing happens on the web.
+        const { openUrl } = await import("@tauri-apps/plugin-opener");
+        await openUrl("https://pluely.com/pricing");
       }
+      setState?.(false);
     } catch (err) {
-      console.error("Failed to get checkout URL:", err);
+      console.error("Sign-in failed to start:", err);
     } finally {
-      setIsCheckoutLoading(false);
-      // Track get license
       await captureEvent(ANALYTICS_EVENTS.GET_LICENSE);
     }
   };
 
   return (
     <Button
-      onClick={handleGetLicenseKey}
-      disabled={isCheckoutLoading}
+      onClick={handleClick}
+      disabled={loading}
       size="sm"
       className={buttonClassName}
     >
-      {isCheckoutLoading ? "Loading..." : buttonText || "Get License"}
+      {buttonText || (signed_in ? "Upgrade" : "Sign in")}
     </Button>
   );
 };

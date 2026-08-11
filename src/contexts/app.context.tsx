@@ -150,7 +150,18 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   );
 
   const getActiveLicenseStatus = async () => {
-    setHasActiveLicense(true);
+    // Entitlement comes from the account session (auth_get_status wraps
+    // /api/me with the 72h offline grace window). Signed out → free mode.
+    try {
+      const status = await invoke<{
+        signed_in: boolean;
+        me: { entitled: boolean } | null;
+      }>("auth_get_status");
+      setHasActiveLicense(status.me?.entitled ?? false);
+    } catch (error) {
+      console.error("Failed to read auth status:", error);
+      setHasActiveLicense(false);
+    }
 
     // Check if the auto configs are enabled
     const autoConfigsEnabled = localStorage.getItem("auto-configs-enabled");
@@ -164,6 +175,16 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       localStorage.setItem("auto-configs-enabled", "true");
     }
   };
+
+  // Re-read entitlement whenever the Rust side completes a sign-in/out.
+  useEffect(() => {
+    const unlisten = listen("auth-changed", () => {
+      getActiveLicenseStatus();
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
 
   useEffect(() => {
     const syncLicenseState = async () => {
